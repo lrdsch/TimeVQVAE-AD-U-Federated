@@ -1,0 +1,532 @@
+% Standalone wrapper to render federated_method.tex as a self-contained PDF.
+% Compile with:  tectonic federated_method_standalone.tex
+\documentclass[11pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{ragged2e}
+\usepackage{amsthm}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{lmodern}     % provides bold small-caps shape (silences T1/lmr/bx/sc warning)
+\usepackage{microtype}  % character protrusion: better justification, fewer bad boxes
+
+\emergencystretch=3em  % absorb minor overfull boxes in this draft preview
+
+\theoremstyle{plain}
+\newtheorem{proposition}{Proposition}
+\theoremstyle{definition}
+\newtheorem{remark}{Remark}
+
+% Marks a pre-registered result that has not yet been measured (see convergence protocol).
+\newcommand{\pending}{\textcolor{gray}{\emph{[to run]}}}
+\usepackage{xcolor}
+
+\title{Federating a Discrete Latent Vocabulary for\\Univariate KPI Anomaly Detection\\
+\large Sufficient-Statistic Codebook Merging: a Benchmark and Mechanism Analysis}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We study how to federate TimeVQVAE-AD across \emph{univariate} clients---one KPI per
+client, which never share raw signals---for time-series anomaly detection. The detector
+learns a discrete time--frequency representation with a VQ-VAE (Stage~1) and fits a
+MaskGIT masked prior over the resulting code indices (Stage~2). The obstacle is that a VQ
+codebook is not a gradient-trained parameter and its entries carry no fixed cross-client
+meaning, so naive weight-averaging is the wrong aggregation primitive. We study a two-part
+recipe: \textbf{(A)}~merge the global codebook from per-code \emph{sufficient
+statistics}---assignment counts and centroid-sums---reproducing the pooled $k$-means
+M-step (federated $k$-means; we claim no new theorem, only that this is the correct
+primitive for a VQ codebook, vs.\ the weight-\textsc{FedAvg} of prior federated-codebook
+work); and \textbf{(B)}~partially personalize the prior, \textsc{FedAvg}-ing its
+transformer body while keeping small per-client output heads local.
+
+Our benchmark is real: WSD, $31$ univariate web-service KPIs (AnoTransfer), grouped into
+$4$ train-only cohorts; a controlled univariate synthetic benchmark with an explicit
+heterogeneity axis serves for mechanism analysis. We report an \emph{honest, in-progress}
+% The 0.31-vs-0.33 calibration claim was WITHDRAWN 2026-07-16: 0.33 has no artifact and 0.31
+% was the under-trained pilot. See federated_method.tex:253. Baseline is pre-registered, pending.
+picture. \textbf{(1)~Calibration:} a mandatory moving-average calibration baseline is
+pre-registered and not yet measured, so we make no claim about the detector's absolute
+advantage; all claims are relative (arm vs arm under one protocol) by construction.
+\textbf{(2)~Pilot viability:} at a short budget the federated recipe is
+the worst of local / centralized / federated in every cohort ($\Delta_{\text{fed}-\text{local}}
+={-}0.19$ VUS-PR, $n{=}31$); but every arm is far from convergence, and on univariate
+synthetic data the sufficient-statistic-vs-\textsc{FedAvg} contrast is exactly zero at this
+budget, so this pilot is \emph{not} evidence about the method. We pre-register the
+converged confirmatory sweep. \textbf{(3)~Mechanism:} because the deployed KPI score is the
+prior term alone, any federated collapse is a \emph{prior} collapse (the Stage-1 codebook
+stays healthy); we localize it and make it CPU-verifiable from persisted checkpoints.
+\textbf{(4)~When federation hurts:} on synthetic data the federated--local gap is monotone
+in cohort heterogeneity, but on real data that signal is null---the only predictor is a
+client's own detectability, i.e.\ federation acts as regression-to-the-mean.
+
+We are explicit about what is and is not established: the sufficient-statistic primitive's
+advantage, and whether federation reaches local/centralized parity, are \emph{open}
+questions resolved only by the pre-registered converged experiment; the calibration,
+mechanism, and heterogeneity findings above are the current, real-data contributions.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:fed-intro}
+
+Time-series anomaly detection underpins monitoring in web services, telemetry,
+industrial plants, and cyber-physical systems. In many of these settings the data are
+partitioned across \emph{clients}---web-service KPIs, operators, hospitals, utility
+substations---each a \emph{single univariate} signal (one key performance indicator)
+instrumented under different operating conditions.
+Pooling these series into a single training corpus is often impossible: raw signals
+are commercially sensitive or regulated, and moving them off-premises is precisely
+what data-governance policies forbid. \emph{Cross-client federated learning} (FL)
+answers this by training a shared model while raw data never leave a
+client~\cite{mcmahan2017fedavg,kairouz2021advances}. It is a natural fit for anomaly
+detection, where each client has abundant local \emph{normal} behavior but cannot
+export the signals themselves.
+
+We build on TimeVQVAE-AD, a detector that (Stage~1) learns a
+discrete time--frequency representation by quantizing an STFT with a
+VQ-VAE~\cite{van_den_oord2017neural,lee2023timevqvae,lee2024timevqvaead} and
+(Stage~2) fits a MaskGIT masked prior over the resulting code
+indices~\cite{chang2022maskgit}; detection combines the prior's masked-NLL surprise
+with a reconstruction-energy term. This discrete, two-stage design is attractive, but
+federating it is an open problem. Discrete/codebook representations \emph{have} been federated
+before---for classification, generative synthesis, and semantic
+communication~\cite{zhang2024uefl,jiang2026synthfed,park2022fcdeepsc,jin2025svqvae}---and
+federated time-series anomaly detection is itself emerging~\cite{perales2023temporalfed};
+but to our knowledge no established recipe federates a VQ-based anomaly
+\emph{detector}, in which the code \emph{indices} are themselves consumed by a
+downstream masked prior, and where existing federated codebooks are either
+personalized per client or averaged as weights for a reconstruction/transmission
+objective (\S\ref{sec:related-work}). The obstacle is that generic
+FedAvg~\cite{mcmahan2017fedavg} assumes gradient-trained, semantically aligned
+parameters that can be averaged elementwise, and a VQ codebook violates both
+assumptions. It is overwritten each step from EMA
+assignment statistics rather than by a loss gradient, and its entries form an
+\emph{unordered} set whose index $j$ has no fixed meaning across clients. Averaging
+codebook weights across clients is therefore not the pooled update it appears to be,
+and---as we show---it silently corrupts the very signal the detector depends on.
+
+This paper proposes and validates a two-part federation recipe for this
+architecture, and gives an honest, mechanism-level account of what works and what
+does not. \textbf{Contribution~A} (\S\ref{sec:fed-stage1}) federates the Stage-1
+codebook by aggregating per-code \emph{sufficient statistics}---assignment counts
+$n_j$ and centroid-sums $m_j$---rather than weights. Given a frozen broadcast
+codebook, the server's merge \emph{exactly reproduces the pooled $k$-means/EM
+M-step for the round's assignments} (Proposition~1, with a unit test); it is the
+aggregation \emph{operator} that is exact, not an equivalence of the federated and
+centralized training processes. The pooled M-step is itself the standard distributed
+Lloyd step of Dhillon \& Modha~\cite{dhillon1999parallel}---same $(n_j,m_j)$ accumulators,
+same sum-allreduces, same smoothed denominator---equivalently the VQ-VAE EMA
+update~\cite[App.~A.1]{van_den_oord2017neural} with the accumulation boundary moved from
+the minibatch to the client; the one-shot k-FED~\cite{dennis2021kfed} is a different
+algorithm and not this precedent. We therefore claim the operator neither as new nor as
+``the correct primitive for a VQ codebook'': Dhillon \& Modha's descent guarantee assumes
+every processor applies the same distance map in a fixed $\mathbb{R}^d$, whereas our E-step
+is a per-client \emph{learned} encoder that drifts each round, so the exactness is real but
+descends no single objective. Our contribution is the measurable consequence---the merged
+codebook is exact to fp32 while the client token languages it induces have disjoint
+support---and the empirical finding that weight-averaging breaks not reconstruction but the
+\emph{prior}. \textbf{Contribution~B} (\S\ref{sec:fed-stage2}) makes the Stage-2
+prior \emph{partially personalized}: the transformer body is FedAvg'd, while the
+channel positional embedding and per-position output bias stay local. This is a
+domain-grounded instance of partial model
+personalization~\cite{arivazhagan2019fedper,collins2021fedrep,pillutla2022partial,li2021fedbn},
+identifying which prior components encode client-specific normality.
+
+We are deliberately honest about what is and is not yet established (full numbers in
+\S\ref{sec:fed-results}). On the \emph{real} univariate KPI benchmark we report three
+current, real-data findings and one pre-registered open question. \emph{Calibration:}
+% WITHDRAWN 2026-07-16 (0.33 unbacked, 0.31 = pilot); see federated_method.tex:253.
+a mandatory moving-average calibration baseline is pre-registered and \pending, so every claim
+in this paper is \emph{relative} (arm vs arm under one protocol), never absolute superiority.
+\emph{Mechanism:} because the deployed KPI score is the prior's masked-NLL term alone,
+any federated collapse is by construction a \emph{prior} collapse---the Stage-1 codebook
+stays healthy---consistent with the hypothesis that weight-\textsc{FedAvg} of the codebook
+breaks the prior by de-aligning code \emph{indices} across clients. \emph{When federation
+hurts:} on controlled synthetic data the federated--local gap is monotone in cohort
+heterogeneity, but on real data that signal vanishes and the sole predictor is a client's
+own detectability, i.e.\ federation behaves as regression-to-the-mean. The \emph{open}
+question, deferred to a pre-registered converged experiment, is whether the
+sufficient-statistic merge beats weight-\textsc{FedAvg}---and whether federation reaches
+local/centralized parity---at convergence: a short-budget pilot leaves every arm
+under-trained and is not evidence about the method. Our reporting follows ML-for-science
+standards~\cite{kapoor2024reforms}, and this study complements recent federated
+time-series anomaly detection~\cite{perales2023temporalfed}.
+
+\paragraph{Contributions.}
+\begin{itemize}
+  \item \textbf{(A) Codebook by sufficient statistics (\S\ref{sec:fed-stage1}).} A
+  federation rule for the VQ codebook that aggregates per-code counts and
+  centroid-sums; given the frozen broadcast codebook, its server-side merge
+  reproduces the exact pooled $k$-means/EM M-step for the round (Proposition~1),
+  keeping code indices globally coherent across clients.
+  \item \textbf{(B) Partially-personalized prior (\S\ref{sec:fed-stage2}).} A
+  domain-grounded instance of partial model personalization for the MaskGIT prior:
+  the transformer body is shared and FedAvg'd, while the channel positional
+  embedding and per-position output bias remain local.
+  \item \textbf{A real-data benchmark and an honest, in-progress evaluation
+  (\S\ref{sec:fed-results}).} On $31$ real univariate KPIs we establish:
+  % withdrawn: "a mandatory moving-average calibration (the deep model does not beat it)" --
+  % that baseline is unmeasured, see federated_method.tex:253.
+  a mechanism localization (the deployed score is the prior alone, so federated collapse
+  is a prior collapse with a healthy codebook, CPU-verifiable from checkpoints); and a
+  heterogeneity analysis (the synthetic ``heterogeneity drives the gap'' law does not hold
+  on real data---detectability does). The primitive's advantage and local/centralized
+  parity are pre-registered as the converged confirmatory experiment, not claimed here.
+\end{itemize}
+
+\section{Related Work}
+\label{sec:related-work}
+
+\paragraph{Discrete-representation generative time-series modeling and anomaly detection.}
+Vector-quantized autoencoders~\cite{van_den_oord2017neural} learn a discrete latent
+codebook, turning a continuous signal into a sequence of code indices that a
+downstream model can treat as tokens. TimeVQVAE~\cite{lee2023timevqvae} ports this
+idea to time series by quantizing a time--frequency (STFT) representation, and
+TimeVQVAE-AD~\cite{lee2024timevqvaead} builds an anomaly detector on top: a MaskGIT
+masked prior~\cite{chang2022maskgit} is fit over the discrete tokens, and detection
+combines the prior's masked negative-log-likelihood (token-level surprise) with a
+reconstruction-energy term. Discrete/VQ representations have been used for anomaly
+detection more broadly---e.g.\ hierarchical VQ transformers for
+images~\cite{lu2023hvqtrans} and quantized autoencoders for multivariate 5G
+telemetry~\cite{trappolini2025qaed}---but, like TimeVQVAE-AD, always in the
+\emph{centralized} setting. We adopt this two-stage discrete pipeline unchanged at
+the single-client level. Our concern is orthogonal to its modeling choices: how to
+learn the shared codebook (Stage~1) and the masked prior (Stage~2) when the
+training data are partitioned across clients that cannot exchange raw signals.
+
+\paragraph{Federated and personalized learning.}
+FedAvg~\cite{mcmahan2017fedavg} aggregates client models by weight averaging and is
+the natural first attempt for both of our stages---yet it is the wrong primitive for
+a VQ codebook. Our Stage-1 merge from per-code sufficient statistics (counts and
+centroid-sums; Proposition~1, \S\ref{sec:fed-stage1}) is not new as an
+\emph{algorithm}: it is the classical one-shot federated $k$-means / EM
+M-step~\cite{dennis2021kfed}, and
+it mirrors the prototype-aggregation view of FedProto~\cite{tan2022fedproto} applied
+to VQ codes. What is new is its \emph{application} to a VQ codebook, together with
+the empirical hypothesis (\S\ref{sec:fed-results}) that
+explains why it should matter here: weight-FedAvg of the codebook does not harm
+reconstruction---the Stage-1 codebook stays healthy---but it
+silently misaligns code \emph{indices} across clients, and because the prior consumes
+indices, this collapses the downstream prior anomaly signal. The sufficient-statistic
+merge keeps index assignment globally coherent because it reproduces the pooled
+M-step for the round.
+
+For Stage~2 we keep a shared transformer body (FedAvg'd) while retaining the channel
+positional embedding and per-position output bias \emph{locally}. This is partial
+model personalization, a well-studied family: client-specific heads or
+layers~\cite{arivazhagan2019fedper,collins2021fedrep}, the general
+partial-personalization framework of~\cite{pillutla2022partial}, local
+batch-normalization statistics~\cite{li2021fedbn}, and regularized or
+Moreau-envelope personalization~\cite{li2021ditto,dinh2020pfedme}. We propose no new
+personalization mechanism; our contribution (B, \S\ref{sec:fed-stage2}) is the
+domain-grounded identification of \emph{which} prior components encode client-specific
+normality (channel embedding and output bias), so that the shared masked prior can
+be globally consistent while still respecting per-client period/jitter heterogeneity.
+
+\paragraph{Federated discrete and codebook representations.}
+A distinct line \emph{does} federate discrete/codebook representations, but outside
+anomaly detection and with different design goals, so none supplies a recipe for the
+problem we target. Closest to our Stage~1, UEFL~\cite{zhang2024uefl} federates a
+discrete codebook across heterogeneous data clients---yet for classification, and by
+\emph{extending} per-client codeword pools for high-uncertainty clients: it deliberately
+maintains \emph{divergent}, client-specific codebooks, whereas we keep a \emph{single}
+globally-coherent codebook whose index~$j$ has one meaning everywhere---a requirement
+forced by our downstream prior, which scores anomalies from the code indices
+themselves. In generative and communication settings the codebook is instead
+federated by \emph{weight averaging or exchange}: SynthFed~\cite{jiang2026synthfed}
+federates a VQ-VAE (with a GPT prior) for privacy-preserving rare-class image
+synthesis; FC-DeepSC~\cite{park2022fcdeepsc} and SVQ-VAE~\cite{jin2025svqvae} average
+or exchange VQ codebooks to build a shared vocabulary for multi-user deep source
+coding and vehicular semantic communication; and UVeQFed~\cite{shlezinger2021uveqfed}
+uses vector quantization to \emph{compress model updates}, not to learn a discrete
+detector. Two things separate all of these from our setting. First, \emph{objective}:
+a reconstruction, transmission, or classification loss tolerates codebook
+weight-averaging, whereas our detector consumes code \emph{indices}, so the
+cross-client index misalignment that weight-averaging induces
+(\S\ref{sec:fed-results}) is hypothesized to collapse the prior's
+anomaly signal. Second, \emph{coverage}: none addresses the two remaining
+detector-specific pieces we need---aggregating the discrete \emph{prior} over tokens,
+and calibrating detection thresholds locally versus globally. Our Stage-1 merge from
+per-code sufficient statistics (Proposition~1) is exactly the globally-coherent
+alternative to codebook weight-averaging that a federated discrete \emph{detector}
+requires.
+
+\paragraph{Federated time-series anomaly detection.}
+Federated anomaly detection for time series is a comparatively small but active line:
+a dedicated benchmark~\cite{liu2022fedtadbench}, federated VAE/reconstruction
+detectors~\cite{zhang2021fedanomaly,zhu2022deepfedad}, and industrial-control
+cyberattack detection (TemporalFED~\cite{perales2023temporalfed}). None of these
+federates a \emph{discrete/VQ} detector---all use continuous-latent autoencoders or
+their variants---so the codebook-federation problem we target does not arise for them.
+Relative to this line, we differ in two ways and state our status plainly. First,
+\emph{modality and object}: we federate a \emph{discrete/VQ} detector on \emph{real
+univariate} KPIs (WSD/AnoTransfer), where the code indices are consumed by a downstream
+masked prior---the codebook-federation problem these continuous-latent detectors do not
+face. Second, \emph{honesty of scope}: we do not claim a federated accuracy gain. On the
+real benchmark a short-budget pilot has federation \emph{below} local-only, but every arm
+is under-trained, so we pre-register a converged confirmatory experiment
+(\S\ref{sec:fed-convergence}, Table~\ref{tab:fed-main-wsd}) rather than draw a method
+conclusion. What we establish now is a real-data mechanism and heterogeneity analysis
+(\S\ref{sec:fed-results}); a privacy-leakage frontier and contamination/non-IID robustness
+are future work.
+
+\input{federated_method}
+
+\section{Conclusion and Limitations}
+\label{sec:fed-conclusion}
+
+We studied how to federate TimeVQVAE-AD across univariate KPI clients that keep raw
+signals local, while making the discrete time--frequency representation and its masked
+prior trainable across clients. The recipe has two parts: \textbf{(A)} a global VQ
+codebook merged from per-code sufficient statistics $(n^{s}_{j}, m^{s}_{j})$, whose
+server-side merge reproduces the pooled $k$-means M-step (federated $k$-means applied to a
+VQ codebook, not a new theorem; Prop.~\ref{prop:exact}, \S\ref{sec:fed-stage1}); and
+\textbf{(B)} a partially-personalized MaskGIT prior whose transformer body is
+\textsc{FedAvg}'d while small per-client output heads stay local (\S\ref{sec:fed-stage2}).
+
+Rather than overclaim, we report an honest, in-progress picture on the \emph{real}
+$31$-client univariate KPI benchmark (\S\ref{sec:fed-results}).
+% withdrawn: "The deep detector does not beat a moving-average baseline" -- unmeasured, see
+% federated_method.tex:253. Also removed "exactly zero" (unbacked) and the stale toy claim.
+All federation comparisons are relative (arm vs arm under one protocol) by construction. A
+short-budget pilot has the federated recipe losing to local-only in every cohort, but every
+arm is far from convergence---so the pilot is not evidence about the method; we
+pre-register the converged confirmatory sweep. What we \emph{can} establish now is
+mechanistic and about \emph{when} federation hurts: the deployed KPI score is the prior
+term alone, so federated degradation is a \emph{prior} collapse with a healthy Stage-1
+codebook; and the ``heterogeneity drives the federated gap'' law that holds on synthetic
+data is \emph{null} on real data, where the only predictor is a client's own
+detectability (federation as regression-to-the-mean).
+
+\paragraph{Limitations.} First, \emph{the confirmatory experiment is pending}: RQ1
+(parity) and RQ2 (the sufficient-statistic primitive vs weight-\textsc{FedAvg}) are drawn
+only at a converged budget, which the pilot does not reach; we therefore make no method
+claim from the pilot. Second, \emph{absolute quality is unmeasured}: the pre-registered
+% was "the deep detector ties a 10-min moving-average" -- "ties" and "does not beat" are
+% different claims from the same absent measurement (0.306 vs 0.330 is a loss, not a tie).
+moving-average calibration baseline (\S\ref{sec:fed-metrics}) has not been run, so we claim
+only relative, protocol-matched contrasts. Third, \emph{statistical power is bounded}: with $31$ entities the paired
+minimum detectable effect is $\approx 0.087$ VUS-PR, so a small suff-stat advantage would
+be undetectable here, and entities within a cohort share a model, making entity-level
+$p$-values mildly anticonservative. Fourth, we run \emph{no privacy or contamination
+experiments}: the upload surface is characterized qualitatively (\S\ref{sec:fed-threat}),
+not measured for leakage.
+
+\paragraph{Future work.} The immediate next step is the pre-registered converged sweep
+(\S\ref{sec:fed-convergence}) that resolves RQ1--RQ3 on real KPIs; alongside it, a
+\emph{damped} exact merge ($\alpha\,e^{\text{local}}{+}(1{-}\alpha)\,e^{\text{merged}}$) as
+a fix for the short-horizon reversal of the primitive's advantage---the exact M-step being
+the right estimator but a poor optimizer step before encoders align. Beyond that: an
+empirical \emph{privacy--leakage frontier} on the uploaded statistics, paired with secure
+aggregation~\cite{bonawitz2017secure} and DP; a heterogeneity-controlled univariate
+benchmark with more high-heterogeneity clients; and testing whether the
+codebook-versus-prior mechanism is a reusable primitive for federating other
+discrete-representation detectors.
+
+\begin{thebibliography}{99}
+\bibitem{mcmahan2017fedavg}
+McMahan, B., Moore, E., Ramage, D., Hampson, S., Ag\"uera y Arcas, B.:
+Communication-Efficient Learning of Deep Networks from Decentralized Data.
+In: AISTATS, pp.\ 1273--1282 (2017)
+
+\bibitem{li2020fedprox}
+Li, T., Sahu, A.K., Zaheer, M., Sanjabi, M., Talwalkar, A., Smith, V.:
+Federated Optimization in Heterogeneous Networks. In: MLSys (2020)
+
+\bibitem{tan2022fedproto}
+Tan, Y., Long, G., Liu, L., Zhou, T., Lu, Q., Jiang, J., Zhang, C.:
+FedProto: Federated Prototype Learning across Heterogeneous Clients.
+In: AAAI, vol.\ 36(8), pp.\ 8432--8440 (2022)
+
+\bibitem{dennis2021kfed}
+Dennis, D.K., Li, T., Smith, V.:
+Heterogeneity for the Win: One-Shot Federated Clustering.
+In: ICML, PMLR 139, pp.\ 2611--2620 (2021)
+
+\bibitem{li2021fedbn}
+Li, X., Jiang, M., Zhang, X., Kamp, M., Dou, Q.:
+FedBN: Federated Learning on Non-IID Features via Local Batch Normalization.
+In: ICLR (2021)
+
+\bibitem{li2021ditto}
+Li, T., Hu, S., Beirami, A., Smith, V.:
+Ditto: Fair and Robust Federated Learning Through Personalization.
+In: ICML, pp.\ 6357--6368 (2021)
+
+\bibitem{dinh2020pfedme}
+T.\ Dinh, C., Tran, N.H., Nguyen, T.D.:
+Personalized Federated Learning with Moreau Envelopes. In: NeurIPS (2020)
+
+\bibitem{zhu2019dlg}
+Zhu, L., Liu, Z., Han, S.: Deep Leakage from Gradients. In: NeurIPS (2019)
+
+\bibitem{bonawitz2017secure}
+Bonawitz, K., et al.: Practical Secure Aggregation for Privacy-Preserving
+Machine Learning. In: ACM CCS, pp.\ 1175--1191 (2017)
+
+\bibitem{so2023securing}
+So, J., Ali, R.E., G\"uler, B., Jiao, J., Avestimehr, A.S.:
+Securing Secure Aggregation: Mitigating Multi-Round Privacy Leakage in
+Federated Learning. In: AAAI (2023)
+
+\bibitem{kairouz2021advances}
+Kairouz, P., McMahan, H.B., et al.:
+Advances and Open Problems in Federated Learning.
+Found.\ Trends Mach.\ Learn.\ 14(1--2), 1--210 (2021)
+
+\bibitem{boniol2022vus}
+Paparrizos, J., Boniol, P., Palpanas, T., Tsay, R.S., Elmore, A., Franklin, M.J.:
+Volume Under the Surface: A New Accuracy Evaluation Measure for Time-Series
+Anomaly Detection. In: VLDB (2022)
+
+\bibitem{huet2022local}
+Huet, A., Navarro, J.M., Rossi, D.:
+Local Evaluation of Time Series Anomaly Detection Algorithms. In: ACM SIGKDD (2022)
+
+\bibitem{kim2022towards}
+Kim, S., Choi, K., Choi, H.-S., Lee, B., Yoon, S.:
+Towards a Rigorous Evaluation of Time-series Anomaly Detection. In: AAAI (2022)
+
+\bibitem{fourure2021how}
+Fourure, D., Javaid, M.U., Posocco, N., Tihon, S.:
+Anomaly Detection: How to Artificially Increase Your F1-Score with a Biased
+Evaluation Protocol. In: ECML PKDD (2021)
+
+\bibitem{perales2023temporalfed}
+S\'anchez S\'anchez, P.M., Huertas Celdr\'an, A., Bovet, G., Mart\'inez P\'erez, G.:
+TemporalFED: Detecting Cyberattacks in Industrial Time-Series Data Using
+Decentralized Federated Learning. arXiv:2308.03554 (2023)
+
+\bibitem{kapoor2024reforms}
+Kapoor, S., Cantrell, E., Peng, K., et al.:
+REFORMS: Consensus-based Recommendations for Machine-learning-based Science.
+Science Advances 10(18) (2024)
+
+% NOTE: the EMA codebook update over $(N_i,m_i)$ cited in \S\ref{sec:fed-isfl} is
+% Eqs.\ (6)--(8) of Appendix~A.1 of the arXiv version ONLY; the NeurIPS proceedings text
+% mentions moving averages in passing and says they are "not used for the experiments in
+% this work". The arXiv pointer below is therefore load-bearing, not decorative.
+\bibitem{van_den_oord2017neural}
+van den Oord, A., Vinyals, O., Kavukcuoglu, K.:
+Neural Discrete Representation Learning. In: NeurIPS, vol.\ 30, pp.\ 6306--6315 (2017).
+EMA codebook update over $(N_i,m_i)$: Appendix~A.1 of arXiv:1711.00937
+
+\bibitem{lee2023timevqvae}
+Lee, D., Malacarne, S., Aune, E.:
+Vector Quantized Time Series Generation with a Bidirectional Prior Model.
+In: AISTATS, PMLR 206, pp.\ 7665--7693 (2023)
+
+\bibitem{lee2024timevqvaead}
+Lee, D., Malacarne, S., Aune, E.:
+Explainable Time Series Anomaly Detection using Masked Latent Generative Modeling.
+Pattern Recognition 156, 110826 (2024)
+
+\bibitem{chang2022maskgit}
+Chang, H., Zhang, H., Jiang, L., Liu, C., Freeman, W.T.:
+MaskGIT: Masked Generative Image Transformer. In: CVPR, pp.\ 11315--11325 (2022)
+
+\bibitem{arivazhagan2019fedper}
+Arivazhagan, M.G., Aggarwal, V., Singh, A.K., Choudhary, S.:
+Federated Learning with Personalization Layers. arXiv:1912.00818 (2019)
+
+\bibitem{collins2021fedrep}
+Collins, L., Hassani, H., Mokhtari, A., Shakkottai, S.:
+Exploiting Shared Representations for Personalized Federated Learning.
+In: ICML, pp.\ 2089--2099 (2021)
+
+\bibitem{pillutla2022partial}
+Pillutla, K., Malik, K., Mohamed, A., Rabbat, M., Sanjabi, M., Xiao, L.:
+Federated Learning with Partial Model Personalization.
+In: ICML, pp.\ 17716--17758 (2022)
+
+\bibitem{zhang2024uefl}
+Zhang, T., Cao, Y., Liu, D.:
+Uncertainty-Based Extensible Codebook for Discrete Federated Learning in
+Heterogeneous Data Silos. In: ICML (2025). arXiv:2402.18888
+
+\bibitem{jiang2026synthfed}
+Jiang, X., Qian, J., Gu, A., Ma, X., Jin, K., Zhang, X., Song, Z.:
+SynthFed: Privacy-Preserving Long-Tail Ophthalmic Diagnosis via VQ-VAE and
+GPT-Augmented Federated Learning. Biomedical Signal Processing and Control 113 (2026)
+
+\bibitem{park2022fcdeepsc}
+Park, C.-H., Choi, J., Park, J., Kim, S.-L.:
+Federated Codebook for Multi-User Deep Source Coding.
+In: ICTC, pp.\ 994--996 (2022)
+
+\bibitem{jin2025svqvae}
+Jin, Z., Li, Y., Song, T., Jia, W.-K., Song, X.:
+SVQ-VAE: Federated-Learning-Based Semantic-Aware Communication for Vehicular
+Networks. IEEE Internet of Things Journal 12(23), 51289--51304 (2025)
+
+\bibitem{shlezinger2021uveqfed}
+Shlezinger, N., Chen, M., Eldar, Y.C., Poor, H.V., Cui, S.:
+UVeQFed: Universal Vector Quantization for Federated Learning.
+IEEE Trans.\ Signal Processing 69, 500--514 (2021)
+
+\bibitem{lu2023hvqtrans}
+Lu, R., Wu, Y., Tian, L., Wang, D., Chen, B., Liu, X., Hu, R.:
+Hierarchical Vector Quantized Transformer for Multi-class Unsupervised Anomaly
+Detection. In: NeurIPS (2023)
+
+\bibitem{trappolini2025qaed}
+Trappolini, G., Purificato, A., Siciliano, F., D'Addona, L., Spagnolo, A.M.,
+Dato, D., Silvestri, F.:
+Quantized Auto Encoder-Based Anomaly Detection for Multivariate Time Series Data
+in 5G Networks. IEEE Access (2025)
+
+\bibitem{liu2022fedtadbench}
+Liu, F., Zeng, C., Zhang, L., Zhou, Y., Mu, Q., Zhang, Y., Zhang, L., Zhu, C.:
+FedTADBench: Federated Time-Series Anomaly Detection Benchmark. In: IEEE HPCC (2022)
+
+\bibitem{zhang2021fedanomaly}
+Zhang, K., Jiang, Y., Seversky, L., Xu, C., Liu, D., Song, H.:
+Federated Variational Learning for Anomaly Detection in Multivariate Time Series.
+In: IEEE IPCCC (2021)
+
+\bibitem{zhu2022deepfedad}
+Zhu, W., Song, D., Chen, Y., Cheng, W., Zong, B., Mizoguchi, T., Lumezanu, C.,
+Chen, H., Luo, J.:
+Deep Federated Anomaly Detection for Multivariate Time Series Data. arXiv:2205.04041 (2022)
+
+% --- added 2026-07-27 for \S sec:fed-isfl; all fields verified against primary sources ---
+
+\bibitem{diaa2025fastlloyd}
+Diaa, A., Humphries, T., Kerschbaum, F.:
+FastLloyd: Federated, Accurate, Secure, and Tunable $k$-Means Clustering with
+Differential Privacy. In: USENIX Security Symposium, pp.\ 2733--2752 (2025)
+
+\bibitem{ramage2020fedanalytics}
+Ramage, D., Mazzocchi, S.:
+Federated Analytics: Collaborative Data Science without Data Collection.
+Google Research Blog, 27 May 2020
+
+\bibitem{geiping2020inverting}
+Geiping, J., Bauermeister, H., Dr\"oge, H., Moeller, M.:
+Inverting Gradients --- How Easy Is It to Break Privacy in Federated Learning?
+In: NeurIPS, vol.\ 33, pp.\ 16937--16947 (2020)
+
+\bibitem{bonawitz2022privacy}
+Bonawitz, K., Kairouz, P., McMahan, B., Ramage, D.:
+Federated Learning and Privacy. Communications of the ACM \textbf{65}(4), 90--97 (2022)
+
+\bibitem{anotransfer}
+Zhang, S., Zhong, Z., Li, D., Fan, Q., Sun, Y., Zhu, M., Zhang, Y., Pei, D.,
+Sun, J., Liu, Y., Yang, H., Zou, Y.:
+Efficient KPI Anomaly Detection Through Transfer Learning for Large-Scale Web
+Services. IEEE Journal on Selected Areas in Communications \textbf{40}(8),
+2440--2455 (2022)
+\end{thebibliography}
+
+\end{document}

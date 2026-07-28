@@ -1,0 +1,1698 @@
+"""STEP 5 — federated evaluation harness (RQ1: does federation help?).
+
+Trains three arms on the synthetic federated benchmark and compares per-client
+detection by REUSING the existing, validated detection pipeline (detect.detect):
+
+  * local-only   — each client trains its full stack (stage1+stage2) ALONE.
+  * centralized  — ONE model trained on the POOLED windows of all clients
+                   (KEEPING per-entity scaler + per-entity threshold; the only
+                   thing centralized is representation learning). The skyline.
+  * federated    — Method A: FedProto global codebook + partially-personalized
+                   prior (from pipeline/federated.py).
+
+For every (arm, client) we save stage1+stage2 checkpoints and call
+`detect.detect(...)`, then aggregate the report metrics MACRO across clients
+(mean, std, worst-client). This is the first table of real numbers (RQ1).
+
+Smoke:
+    CUDA_VISIBLE_DEVICES=1 python pipeline/federated_eval.py \
+        --arms local,centralized,federated --clients fed_0,fed_1,fed_2 \
+        --s1-epochs 2 --s2-epochs 2 --s1-rounds 2 --s2-rounds 2 --batch 16
+"""
+from __future__ import annotations
+
+import argparse
+import copy
+import json
+import math
+import os
+from pathlib import Path
+
+import numpy as np
+import torch
+
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))    # repo root
+sys.path.insert(0, str(Path(__file__).resolve().parent))           # pipeline/
+
+from torch.utils.data import ConcatDataset, Subset
+
+from config import Config, apply_dataset_overrides, apply_env_overrides
+from data import make_dataloaders, _build_loader
+from stage1 import Stage1VQVAE, save_stage1_checkpoint
+from stage2 import Stage2System, save_stage2_checkpoint, load_stage2, counterfactual
+from utils import resolve_path, seed_everything, force_utf8_stdout
+import detect
+from federated import (
+    federated_stage1, federated_stage2, federated_stage2_proto,
+    resolve_clients, LOCAL_PRIOR_PREFIXES, _amp,
+    _amp_dtype, _make_scaler, _build_client, _cycle,
+)
+
+# Detection metrics surfaced in the comparison table (higher is better).
+# THRESHOLD-FREE only. `f1` and `affiliation_f1` are read off one arbitrary quantile
+# threshold, so an arm can win or lose the table by where its score distribution
+# happens to sit rather than by how well it ranks anomalies; they moved to the
+# appendix block below. `pate_f1` is PATE's threshold-free (proximity-aware AUC-PR)
+# form despite the name. detect() still computes all of them.
+METRIC_KEYS = ["vus_pr", "auprc", "auroc", "pate_f1"]
+THRESHOLDED_KEYS = ["affiliation_f1", "f1"]
+# Counterfactual-fidelity-vs-x_clean metrics (the explainability thesis).
+#   cf_repair_improvement ↑ : 1 - MAE(x_cf,x_clean)/MAE(x,x_clean) on ANOMALOUS cells
+#                             (how much the CF moved the anomaly back to true normal)
+#   cf_repair_ratio       ↓ : the raw ratio (0 = perfect recovery, 1 = no change)
+#   cf_disturb_mae        ↓ : MAE(x_cf,x_clean) on CLEAN cells (non-disturbance)
+CF_KEYS = ["cf_repair_improvement", "cf_repair_ratio", "cf_disturb_mae", "cf_n_windows"]
+
+# Default server-side codebook-EMA decay γ for `federated_cb_only_ema`. The server EMA
+# runs over ROUNDS (a handful), not the thousands of steps `cfg.quantizer.ema_decay`
+# (0.99) was tuned for, so 0.99 there means "barely update per round". 0.8 gives an
+# effective window of ~1/(1−γ)=5 rounds — enough to average out the noisy per-round
+# k-FED M-step while still tracking the drifting encoder. Override with --cb-server-ema-decay.
+_CB_SERVER_EMA_DEFAULT_DECAY = 0.8
+
+
+# ─── building blocks (local / centralized training) ──────────────────────────
+
+def _materialized_stage1(cfg: Config, example: torch.Tensor, device, collect_stats: bool) -> Stage1VQVAE:
+    m = Stage1VQVAE(cfg)
+    m.eval()
+    with torch.no_grad():
+        m(example.cpu())
+    m.to(device)
+    m.quantizer.collect_stats_only = collect_stats   # False ⇒ normal local EMA codebook (both VQ types)
+    return m
+
+
+# NOTE both trainers run their forward under the SAME `_amp()` guard — and the same
+# `_make_scaler()` — as the federated local trainers (pipeline/federated.py). Without
+# it the baselines would train in fp32 while the federated arms train in fp16/bf16,
+# and the arms would not be iso-precision — an uncontrolled confound in the RQ1 table.
+# `_amp()` is a no-op off CUDA and is disabled by FEDVQ_AMP=off, so every arm follows
+# one knob. The scaler is a pass-through unless the dtype is fp16.
+def _epoch_log(tag: str, stage: str, ep: int, n_epochs: int, tot: float, nb: int) -> None:
+    # Convergence trace: first 2, every 5th, and last 3 epochs — enough to SEE the
+    # plateau (a still-falling loss at the last epochs => undertrained, bump budget).
+    if nb and (ep < 2 or ep >= n_epochs - 3 or (ep + 1) % 5 == 0):
+        print(f"  [{stage}{(' ' + tag) if tag else ''}] ep {ep + 1}/{n_epochs} loss={tot / nb:.4f}", flush=True)
+
+
+def _train_stage1(model: Stage1VQVAE, loader, n_epochs: int, lr: float, device, tag: str = "") -> None:
+    opt = torch.optim.AdamW(model.parameters(), lr=lr, fused=(torch.device(device).type == "cuda"))
+    scaler = _make_scaler()
+    model.train()
+    for ep in range(n_epochs):
+        tot, nb = 0.0, 0
+        for batch in loader:
+            x = batch["inputs"].to(device, non_blocking=True)
+            with _amp():
+                loss = model(x)["losses"]["loss"]
+            opt.zero_grad(set_to_none=True)
+            scaler.scale(loss).backward(); scaler.step(opt); scaler.update()
+            lv = float(loss.detach())
+            if lv == lv:                       # skip NaN in the running mean
+                tot += lv; nb += 1
+        _epoch_log(tag, "s1", ep, n_epochs, tot, nb)
+
+
+def _build_train_stage2(cfg: Config, stage1: Stage1VQVAE, loader, n_epochs: int,
+                        lr: float, device, example: torch.Tensor, tag: str = "") -> Stage2System:
+    loader = _restage2_loader(cfg, loader, shuffle=True)   # batch_size_stage2, not stage1's
+    s2 = Stage2System(cfg, stage1)
+    s2.prior.to(device)
+    s2.materialize(example.to(device))
+    s2.to(device)
+    opt = torch.optim.AdamW(s2.prior.parameters(), lr=lr, fused=(torch.device(device).type == "cuda"))
+    scaler = _make_scaler()
+    s2.stage1.eval(); s2.prior.train()
+    for ep in range(n_epochs):
+        tot, nb = 0.0, 0
+        for batch in loader:
+            batch["inputs"] = batch["inputs"].to(device, non_blocking=True)
+            with _amp():
+                tokens = s2.tokens_from_batch(batch)
+                s2._inform_latent_shape()
+                loss = s2.prior(tokens).loss
+            opt.zero_grad(set_to_none=True)
+            scaler.scale(loss).backward(); scaler.step(opt); scaler.update()
+            lv = float(loss.detach())
+            if lv == lv:
+                tot += lv; nb += 1
+        _epoch_log(tag, "s2", ep, n_epochs, tot, nb)
+    return s2
+
+
+def _build_train_stage2_steps(cfg: Config, stage1: Stage1VQVAE, loader, n_steps: int,
+                              lr: float, device, example: torch.Tensor, tag: str = "") -> Stage2System:
+    """STEP-based pooled prior (vs the epoch-based `_build_train_stage2`). Used by Cell C so
+    the pooled prior's optimizer-update budget matches the τ-FedSGD prior's round count
+    exactly, on a frozen tokenizer. Same AMP/scaler path as every other trainer.
+
+    The re-batch to `batch_size_stage2` does NOT change the step-matching: the τ-FedSGD
+    arm this is matched against drew from the same stage-1-batched loader, so both sides
+    were equally off. Both now move to the configured stage-2 batch together, keeping
+    a "step" here equal to a "step" there."""
+    loader = _restage2_loader(cfg, loader, shuffle=True)
+    s2 = Stage2System(cfg, stage1)
+    s2.prior.to(device)
+    s2.materialize(example.to(device))
+    s2.to(device)
+    opt = torch.optim.AdamW(s2.prior.parameters(), lr=lr, fused=(torch.device(device).type == "cuda"))
+    scaler = _make_scaler()
+    s2.stage1.eval(); s2.prior.train()
+    it = _cycle(loader)
+    tot, nb = 0.0, 0
+    for step in range(n_steps):
+        batch = next(it)
+        batch["inputs"] = batch["inputs"].to(device, non_blocking=True)
+        with _amp():
+            tokens = s2.tokens_from_batch(batch)
+            s2._inform_latent_shape()
+            loss = s2.prior(tokens).loss
+        opt.zero_grad(set_to_none=True)
+        scaler.scale(loss).backward(); scaler.step(opt); scaler.update()
+        lv = float(loss.detach())
+        if lv == lv:
+            tot += lv; nb += 1
+        if step < 2 or step >= n_steps - 2 or (step + 1) % 200 == 0:
+            print(f"  [s2{(' ' + tag) if tag else ''}] step {step + 1}/{n_steps} "
+                  f"loss={tot / max(nb, 1):.4f}", flush=True)
+    return s2
+
+
+# ─── "converged" protocol: the run.py training recipe, in-process ────────────
+# `--protocol converged` swaps the fixed-epoch trainers above for the SAME recipe
+# pipeline/stage1.py and pipeline/stage2.py run under run.py: warmup+cosine LR,
+# an fp32 validation pass every epoch, step-based early-stopping patience, and
+# best-on-val weight selection. Those two scripts are the trainers that produced
+# the high-scoring runs; the fixed-epoch trainers above never build a val loader
+# at all, so they can neither stop on convergence nor select a best checkpoint.
+#
+# Deliberately NOT a wrapper around stage1.main()/stage2.main(): the federated
+# arms need live in-memory models to average weights mid-training, so this file
+# keeps its own loops. The recipe is mirrored; the code path is not shared.
+#
+# AMP still goes through federated.py's `_amp()`/`_make_scaler()` rather than
+# stage{1,2}.py's inline autocast: both resolve to the same dtype (fp16 below
+# Ampere, bf16 from Ampere on -- see `_amp_dtype`), but routing through the
+# federated helpers keeps every arm on ONE precision knob (FEDVQ_AMP), so the
+# baselines stay iso-precision with the federated arms.
+def _converged_budget(cfg: Config, batches_per_epoch: int, stage: int, tag: str = ""):
+    """Resolve (max_steps, warmup_steps, patience_steps, max_epochs) as
+    pipeline/stage{1,2}.py do — `min_epochs` RAISES the step cap so the LR schedule
+    spans the guaranteed passes over the data — but CLAMPED at the configured ceiling.
+
+    The clamp is what keeps `local` and `centralized` comparable. The floor scales with
+    `batches_per_epoch`, which is ~K x larger on a pooled loader, so an unclamped floor
+    hands the skyline arm a proportionally bigger budget than the baseline it is meant
+    to be measured against. On the pooled UCR arm (5.3M windows) it reached 31x the
+    stage-1 ceiling. Under the clamp every arm shares one ceiling and EARLY STOPPING —
+    the intended binding stopper — decides where each actually halts.
+
+    Harmless where the floor never binds anyway: on wsd/toy at the configured batch
+    sizes, and on every single-client `local` run, floor < ceiling already.
+    """
+    max_steps = int(getattr(cfg.training, f"stage{stage}_max_steps"))
+    min_epochs = int(getattr(cfg.training, f"stage{stage}_min_epochs", 0))
+    if min_epochs > 0:
+        floor = min_epochs * batches_per_epoch
+        if floor > max_steps:
+            print(f"  [s{stage}{(' ' + tag) if tag else ''}] min_epochs floor {floor} "
+                  f"CLAMPED to the {max_steps}-step ceiling ({batches_per_epoch} "
+                  f"batches/epoch); early stopping decides the real stop.", flush=True)
+    warmup_steps = max(1, int(max_steps * cfg.training.warmup_rate))
+    return (max_steps, warmup_steps,
+            int(getattr(cfg.training, f"stage{stage}_patience_steps")),
+            int(getattr(cfg.training, f"stage{stage}_max_epochs")))
+
+
+def _cosine_lr(opt, max_steps: int, warmup_steps: int):
+    def lr_lambda(step: int) -> float:
+        if step < warmup_steps:
+            return step / warmup_steps
+        progress = (step - warmup_steps) / max(max_steps - warmup_steps, 1)
+        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
+    return torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda)
+
+
+def _snapshot(model) -> dict:
+    """CPU copy of the weights = the in-memory analogue of stage{1,2}.py's
+    `best.ckpt`. Detection must score the BEST-on-val weights, not whatever the
+    last epoch happened to leave behind."""
+    return {k: v.detach().to("cpu", copy=True) for k, v in model.state_dict().items()}
+
+
+def _converged_loop(*, step_fn, val_fn, params, cfg, stage: int,
+                    batches_per_epoch: int, train_loader, val_loader,
+                    model_for_state, tag: str, device) -> None:
+    """Shared train/val/early-stop driver for both stages (they differ only in the
+    per-batch forward and the module whose weights are snapshotted)."""
+    max_steps, warmup_steps, patience_steps, max_epochs = _converged_budget(
+        cfg, batches_per_epoch, stage, tag=tag)
+    opt = torch.optim.AdamW(params, lr=cfg.training.lr,
+                            fused=(torch.device(device).type == "cuda"))
+    sched = _cosine_lr(opt, max_steps, warmup_steps)
+    scaler = _make_scaler()
+    label = f"s{stage}{(' ' + tag) if tag else ''}"
+    print(f"  [{label}] converged protocol: max_steps={max_steps} "
+          f"warmup={warmup_steps} patience={patience_steps} "
+          f"({batches_per_epoch} batches/epoch)", flush=True)
+
+    best_val, best_step = float("inf"), 0
+    best_state = _snapshot(model_for_state)
+    step, epoch, stop = 0, 0, False
+    while not stop and epoch < max_epochs:
+        tot, nb = 0.0, 0
+        for batch in train_loader:
+            with _amp():
+                loss = step_fn(batch)
+            opt.zero_grad(set_to_none=True)
+            scaler.scale(loss).backward()
+            prev_scale = scaler.get_scale()
+            scaler.step(opt); scaler.update()
+            # A skipped step means no weights moved: the LR schedule must not
+            # advance either, or it desyncs from the optimiser under fp16.
+            if scaler.get_scale() >= prev_scale:
+                sched.step()
+            lv = float(loss.detach())
+            if lv == lv:
+                tot += lv; nb += 1
+            step += 1
+            if step >= max_steps:
+                stop = True
+                break
+
+        # Validation stays fp32 on purpose: it drives early stopping and weight
+        # selection, so it must not depend on the training precision.
+        ran_val, vtot, vnb = False, 0.0, 0
+        if val_loader is not None and epoch % cfg.training.check_val_every_n_epoch == 0:
+            ran_val = True
+            with torch.no_grad():
+                for batch in val_loader:
+                    lv = float(val_fn(batch))
+                    if lv == lv:
+                        vtot += lv; vnb += 1
+
+        tr = tot / max(nb, 1)
+        va = vtot / vnb if vnb else float("nan")
+        if epoch < 2 or (epoch + 1) % 5 == 0:
+            print(f"  [{label}] ep {epoch} step {step} train={tr:.4f} val={va:.4f} "
+                  f"lr={opt.param_groups[0]['lr']:.2e}", flush=True)
+
+        if ran_val and vnb:
+            if va < best_val - cfg.training.early_stopping_min_delta:
+                best_val, best_step = va, step
+                best_state = _snapshot(model_for_state)
+            elif (cfg.training.early_stopping and step >= warmup_steps
+                  and step - best_step >= patience_steps):
+                # Gated on WARMUP, not on min_epochs: min_epochs raises max_steps to
+                # span the LR schedule, so gating on it would disable early stopping.
+                print(f"  [{label}] early stop @ep{epoch} step{step} "
+                      f"(no val gain for {step - best_step} steps; "
+                      f"best={best_val:.4f}@{best_step})", flush=True)
+                stop = True
+        epoch += 1
+
+    model_for_state.load_state_dict(best_state)          # restore BEST-on-val
+    print(f"  [{label}] done: {epoch} epochs, {step} steps, "
+          f"best val={best_val:.4f} @step {best_step}", flush=True)
+
+
+def _train_stage1_converged(model: Stage1VQVAE, train_loader, val_loader,
+                            cfg: Config, device, tag: str = "") -> None:
+    def step_fn(batch):
+        return model(batch["inputs"].to(device, non_blocking=True))["losses"]["loss"]
+
+    def val_fn(batch):
+        return model(batch["inputs"].to(device, non_blocking=True))["losses"]["loss"]
+
+    model.train()
+    _converged_loop(
+        step_fn=lambda b: (model.train(), step_fn(b))[1],
+        val_fn=lambda b: (model.eval(), val_fn(b))[1],
+        params=model.parameters(), cfg=cfg, stage=1,
+        batches_per_epoch=len(train_loader), train_loader=train_loader,
+        val_loader=val_loader, model_for_state=model, tag=tag, device=device)
+
+
+def _restage2_loader(cfg: Config, loader, shuffle: bool):
+    """Re-batch a stage-1 loader at `batch_size_stage2`.
+
+    `_loaders_for` builds every client bundle with `stage="stage1"`, and
+    `_pooled_loader` likewise uses `batch_size_stage1` -- so every stage-2 trainer
+    reachable from here inherited the STAGE-1 batch size (256) instead of
+    `batch_size_stage2` (128), making the latter dead config. The federated arms had
+    the identical defect via `Stage2ClientState.data.train_loader`; it is fixed there
+    by `Stage2ClientState.s2_loader`. Rebuilding from the same underlying dataset puts
+    every arm on the configured stage-2 batch -- the run.py recipe, and the OOM-safe one.
+    """
+    if loader is None:
+        return None
+    return _build_loader(loader.dataset, cfg.dataset.batch_size_stage2,
+                         cfg.dataset.num_workers, shuffle=shuffle)
+
+
+def _build_train_stage2_converged(cfg: Config, stage1: Stage1VQVAE, train_loader,
+                                  val_loader, device, example: torch.Tensor,
+                                  tag: str = "") -> Stage2System:
+    train_loader = _restage2_loader(cfg, train_loader, shuffle=True)
+    val_loader = _restage2_loader(cfg, val_loader, shuffle=False)
+    s2 = Stage2System(cfg, stage1)
+    s2.prior.to(device)
+    s2.materialize(example.to(device))
+    s2.to(device)
+    s2.stage1.eval()
+
+    def _loss(batch):
+        batch["inputs"] = batch["inputs"].to(device, non_blocking=True)
+        tokens = s2.tokens_from_batch(batch)
+        s2._inform_latent_shape()
+        return s2.prior(tokens).loss
+
+    _converged_loop(
+        step_fn=lambda b: (s2.prior.train(), _loss(b))[1],
+        val_fn=lambda b: (s2.prior.eval(), _loss(b))[1],
+        params=s2.prior.parameters(), cfg=cfg, stage=2,
+        batches_per_epoch=len(train_loader), train_loader=train_loader,
+        val_loader=val_loader, model_for_state=s2.prior, tag=tag, device=device)
+    return s2
+
+
+def _pooled_loader(cfg: Config, entities: list[str], data_by_e: dict, cap: int = 0):
+    """ONE loader over the CONCATENATION of every client's training windows.
+
+    `cap>0` subsamples the pooled set to `cap` windows drawn DIVERSELY across all
+    clients (random Subset). Used to isolate diversity/regularization from raw data
+    volume: a small diverse budget vs a single client's own budget.
+
+    The centralized skyline must see genuinely pooled, entity-MIXED batches. The
+    previous implementation looped `for loader in loaders` inside each epoch, so
+    every batch was entity-pure and each epoch was a round-robin — the VQ's EMA
+    (effective window ~1/(1-decay) = 100 steps, vs 49 steps per entity) then
+    tracked whichever entity trained last, biasing the final codebook by loop
+    order. Windows are already per-entity standardised, so concatenating is sound.
+    """
+    ds = ConcatDataset([data_by_e[e].train_dataset for e in entities])
+    if cap and cap < len(ds):
+        idx = torch.randperm(len(ds))[:cap].tolist()   # seeded by seed_everything(seed) upstream
+        ds = Subset(ds, idx)
+        print(f"[centralized] POOL CAP: {cap} of {len(idx)} windows (diverse subsample across {len(entities)} clients)")
+    return _build_loader(ds, cfg.dataset.batch_size_stage1, cfg.dataset.num_workers, shuffle=True)
+
+
+def _pooled_val_loader(cfg: Config, entities: list[str], data_by_e: dict):
+    """Validation twin of `_pooled_loader` — the pooled model must early-stop on the
+    pooled val split, i.e. the same union of clients it trains on. Never capped and
+    never shuffled: it is only ever consumed as a whole, in eval mode."""
+    ds = ConcatDataset([data_by_e[e].val_dataset for e in entities])
+    if len(ds) == 0:
+        return None
+    return _build_loader(ds, cfg.dataset.batch_size_stage1, cfg.dataset.num_workers, shuffle=False)
+
+
+def _loaders_for(cfg: Config, entities: list[str]) -> dict[str, object]:
+    out = {}
+    for e in entities:
+        c = copy.deepcopy(cfg); c.dataset.entity_id = e
+        out[e] = make_dataloaders(c, stage="stage1")
+    return out
+
+
+# ─── arms → per-client (stage1, stage2) ──────────────────────────────────────
+
+def train_local(cfg, entities, data_by_e, s1_epochs, s2_epochs, device,
+                protocol: str = "fixed") -> dict:
+    """One model per client — literally one time series per model.
+
+    `protocol="converged"` trains each client with the run.py recipe (val-driven
+    early stopping, warmup+cosine, best-on-val weights), so `s1_epochs`/`s2_epochs`
+    are IGNORED: the stop point comes from the client's own validation curve.
+    """
+    models = {}
+    for e in entities:
+        d = data_by_e[e]
+        ex = next(iter(d.train_loader))["inputs"][:1]
+        s1 = _materialized_stage1(cfg, ex, device, collect_stats=False)
+        if protocol == "converged":
+            _train_stage1_converged(s1, d.train_loader, d.val_loader, cfg, device, tag=e)
+            s2 = _build_train_stage2_converged(cfg, s1, d.train_loader, d.val_loader,
+                                               device, ex, tag=e)
+        else:
+            # STEP ASYMMETRY vs train_centralized: both take `s1_epochs`, neither is step-matched.
+            # Here an epoch is ceil(n_e/batch) steps over THIS client; there it is ceil(sum_k n_k/batch)
+            # over the pooled loader, so centralized gets ~K x the median client's optimizer steps and
+            # the ratio grows with cluster size. "Epochs" is the matched unit; steps are NOT. The
+            # step-matched reference is the Cell-C arm federated_pooltok_centralprior.
+            _train_stage1(s1, d.train_loader, s1_epochs, cfg.training.lr, device, tag=e)
+            s2 = _build_train_stage2(cfg, s1, d.train_loader, s2_epochs, cfg.training.lr, device, ex, tag=e)
+        models[e] = (s1, s2)
+        print(f"[local] {e} trained ({protocol})")
+    return models
+
+
+def train_centralized(cfg, entities, data_by_e, s1_epochs, s2_epochs, device, pool_cap: int = 0,
+                      protocol: str = "fixed") -> dict:
+    """The pooled skyline: the SAME model as `local`, same trainer, trained on the
+    CONCATENATION of every client's windows.
+
+    Under `protocol="converged"` it is also the same *protocol* as `local` — both
+    stop on their own validation curve. That is what makes the two arms comparable:
+    the old fixed-epoch pairing was epoch-matched but NOT step-matched (see below),
+    so the pooled arm silently bought ~K x more optimizer steps.
+    """
+    loader = _pooled_loader(cfg, entities, data_by_e, cap=pool_cap)   # entity-MIXED batches
+    ex = next(iter(loader))["inputs"][:1]
+    s1 = _materialized_stage1(cfg, ex, device, collect_stats=False)
+    if protocol == "converged":
+        val_loader = _pooled_val_loader(cfg, entities, data_by_e)
+        _train_stage1_converged(s1, loader, val_loader, cfg, device, tag="central")
+        s2 = _build_train_stage2_converged(cfg, s1, loader, val_loader, device, ex, tag="central")
+    else:
+        # STEP ASYMMETRY vs train_local: the same `s1_epochs` buys ceil(sum_k n_k/batch) steps here
+        # against ceil(n_e/batch) there -- ~K x more, tracking cluster size. This arm is EPOCH-matched
+        # to `local`, NOT step-matched; a table that labels it "step-matched" means Cell C, not this.
+        _train_stage1(s1, loader, s1_epochs, cfg.training.lr, device, tag="central")
+        s2 = _build_train_stage2(cfg, s1, loader, s2_epochs, cfg.training.lr, device, ex, tag="central")
+    print(f"[centralized] one model trained on {len(loader.dataset)} pooled windows "
+          f"from {len(entities)} clients ({len(loader)} steps/epoch, {protocol})")
+    return {e: (s1, s2) for e in entities}                                  # same model for every client
+
+
+# Set by main() before each (arm, seed); read by `train_federated` when its own
+# resume_from/resume_out are not given. Module-level rather than threaded through all 18
+# train_federated call sites, so no other arm's signature or behaviour changes.
+_RESUME_CTX: dict = {"from": None, "out": None}
+
+
+def train_federated(cfg, entities, s1_rounds, s2_rounds, local_epochs, device, seed: int = 7,
+                    local_prefixes: tuple[str, ...] = LOCAL_PRIOR_PREFIXES,
+                    cb_merge: str = "suffstat", cb_server_ema_decay: float | None = None,
+                    revive_dead: bool = True,
+                    anchor_weight: float = 0.0,
+                    fed_encoder: str = "off", enc_split_at: int = 2,
+                    enc_fed_algo: str = "fedavg", enc_bn: str = "buffers_local",
+                    enc_prox_mu: float = 0.0, enc_prox_form: str = "loss",
+                    enc_proto_weight: float = 0.0, enc_proto_agg: str = "uniform",
+                    enc_proto_code_weight: str = "uniform", enc_proto_seed_round0: bool = True,
+                    enc_proto_fedavg: bool = False, enc_sched: str = "none",
+                    resume_from=None, resume_out=None, patience_rounds: int = 0,
+                    resume_rounds_done: int = 0,
+                    fed_align: str = "off", align_weight: float = 0.0, align_cluster: str | None = None,
+                    server_momentum: float = 0.0,
+                    tau_steps: int = 0, server_opt: str = "sgd", server_lr: float = 0.01,
+                    proto_weight: float = 0.0, proto_probe_windows: int = 1024,
+                    proto_mask_ratio: float = 0.5, protocol: str = "fixed",
+                    out_history: dict | None = None) -> dict:
+    # `protocol="converged"` gives the federated arm the SAME training regime that lifted
+    # the local/centralized baselines, so its verdict is comparable to the risen local:
+    #   * stage 1: select_on_val restores the best round (the round-based analogue of the
+    #     baselines' best-on-val restore); over-provision rounds safely, the best is kept.
+    #   * stage 2: if the prior is FULLY LOCAL (cb_only, local_prefixes==("",)), there is no
+    #     cross-client aggregation, so the round loop was pure overhead — train each client's
+    #     prior with the EXACT converged loop the baselines use (val early-stop, warmup+cosine,
+    #     best-on-val). This makes cb_only's prior identical-protocol to `local`'s; the ONLY
+    #     difference from `local` is then the shared codebook -> clean attribution.
+    converged = (protocol == "converged")
+    resume_from = resume_from if resume_from is not None else _RESUME_CTX["from"]
+    # Every federated arm gets its per-round telemetry persisted, not only the encoder trio:
+    # the trio's dispatch passes `out_history` explicitly, every other arm inherits the sink
+    # from here. Without this, `federated_cb_only` runs (the probe, the ema sweep) produced no
+    # fed_history.json and their curves survived only in stdout.
+    out_history = out_history if out_history is not None else _RESUME_CTX.get("hist")
+    patience_rounds = patience_rounds or int(_RESUME_CTX.get("patience") or 0)
+    resume_out = resume_out if resume_out is not None else _RESUME_CTX["out"]
+    # `out_history` is the ONLY way the per-round federated telemetry (loss, val, perplexity,
+    # dead_frac, codebook drift, and the encoder-federation channels) survives this call:
+    # the caller gets models back, and everything the rounds measured used to be dropped on
+    # the floor. Optional so no existing call site changes behaviour.
+    clients, _, s1_history = federated_stage1(
+        cfg, entities, rounds=s1_rounds, local_epochs=local_epochs,
+        seed=seed, merge=cb_merge, cb_server_ema_decay=cb_server_ema_decay,
+        revive_dead=revive_dead, anchor_weight=anchor_weight,
+        fed_encoder=fed_encoder, enc_split_at=enc_split_at,
+        enc_fed_algo=enc_fed_algo, enc_bn=enc_bn,
+        enc_prox_mu=enc_prox_mu, enc_prox_form=enc_prox_form,
+        enc_proto_weight=enc_proto_weight, enc_proto_agg=enc_proto_agg,
+        enc_proto_code_weight=enc_proto_code_weight,
+        enc_proto_seed_round0=enc_proto_seed_round0,
+        enc_proto_fedavg=enc_proto_fedavg, enc_sched=enc_sched,
+        resume_from=resume_from, resume_out=resume_out,
+        patience_rounds=patience_rounds,
+        resume_rounds_done=resume_rounds_done or int(_RESUME_CTX.get("rounds_done") or 0),
+        fed_align=fed_align, align_weight=align_weight,
+        align_cluster=align_cluster, select_on_val=converged)
+    if out_history is not None:
+        out_history["stage1"] = s1_history
+    prior_fully_local = (local_prefixes == ("",))
+    if converged and prior_fully_local and proto_weight == 0 and tau_steps == 0:
+        out = {}
+        for c in clients:
+            d = next(next(iter(c.model.parameters())).device for _ in [0])
+            ex = next(iter(c.data.train_loader))["inputs"][:1]
+            s2 = _build_train_stage2_converged(cfg, c.model, c.data.train_loader,
+                                               c.data.val_loader, d, ex, tag=c.entity_id)
+            out[c.entity_id] = (c.model, s2)
+            print(f"[fed-cb_only] {c.entity_id} prior trained (converged, "
+                  f"{'LOCAL' if cb_merge == 'local' else 'shared'} codebook)")
+        return out
+    if proto_weight > 0:
+        s2_clients, h2, _ = federated_stage2_proto(clients, cfg, rounds=s2_rounds, local_epochs=local_epochs,
+                                                   seed=seed, proto_weight=proto_weight,
+                                                   probe_windows=proto_probe_windows,
+                                                   mask_ratio=proto_mask_ratio,
+                                                   batch=cfg.dataset.batch_size_stage2)
+    else:
+        # (clients, HISTORY, head_div) — the middle element. Unpacking the third put the
+        # scalar head-divergence into fed_history.json and silently dropped the rounds.
+        s2_clients, h2, _ = federated_stage2(clients, cfg, rounds=s2_rounds, local_epochs=local_epochs, seed=seed,
+                                             local_prefixes=local_prefixes, server_momentum=server_momentum,
+                                             tau_steps=tau_steps, server_opt=server_opt, server_lr=server_lr,
+                                             select_on_val=converged)
+    if out_history is not None:
+        out_history["stage2"] = h2
+    return {c.entity_id: (c.s2.stage1, c.s2) for c in s2_clients}
+
+
+def train_fedsgd_pooltok(cfg, entities, data_by_e, s1_epochs, s2_rounds, local_epochs, device,
+                         seed: int = 7, tau_steps: int = 1,
+                         server_opt: str = "fedadam", server_lr: float = 0.01,
+                         tok_cache_dir: "str | Path | None" = None) -> dict:
+    """Cell A of the tokenizer×prior 2×2 — decouple the two axes of the wsd gap.
+
+    A SINGLE POOLED tokenizer (trained on entity-MIXED batches, IDENTICAL code path to
+    `train_centralized`'s stage1) is trained once and FROZEN; then the fully-shared
+    prior (`local_prefixes=()`) is federated at τ optimizer STEPS/round with a FedAdam
+    server — the exact `federated_fedsgd` prior regime — over each client's OWN token
+    stream. Because every client wraps the *same* frozen pooled tokenizer, this holds
+    the tokenizer fixed and varies only the prior:
+
+        centralized − pooltok  = pure PRIOR-federation penalty (identical pooled tokenizer)
+        pooltok     − fedsgd    = pure TOKENIZER penalty        (identical τ prior)
+
+    τ=1 ⇒ each round is one distributed-SGD step from a common broadcast init, so the
+    prior should recover the centralized prior — the sanity upper bound. The pooled
+    tokenizer is cached per (seed, s1_epochs) so the τ sweep trains it ONCE, keeping
+    the tokenizer bit-identical across τ (and cheap)."""
+    # 1) POOLED tokenizer — cached across the τ sweep (τ-independent ⇒ same tokenizer).
+    loader = _pooled_loader(cfg, entities, data_by_e)
+    ex = next(iter(loader))["inputs"][:1]
+    s1 = _materialized_stage1(cfg, ex, device, collect_stats=False)
+    cache = (Path(tok_cache_dir) / f"pooltok_seed{seed}_s1e{s1_epochs}.pt") if tok_cache_dir else None
+    if cache is not None and cache.exists():
+        s1.load_state_dict(torch.load(cache, map_location=device))
+        s1.to(device)
+        print(f"[pooltok] loaded cached pooled tokenizer <- {cache}")
+    else:
+        _train_stage1(s1, loader, s1_epochs, cfg.training.lr, device, tag="pooltok")
+        if cache is not None:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(s1.state_dict(), cache)
+            print(f"[pooltok] cached pooled tokenizer -> {cache}")
+    s1.eval()
+    print(f"[pooltok] frozen pooled tokenizer on {len(loader.dataset)} pooled windows "
+          f"from {len(entities)} clients; federating shared prior at tau={tau_steps} "
+          f"({s2_rounds} round(s), server={server_opt})")
+
+    # 2) per-client stage1 states that all SHARE the one frozen pooled tokenizer but
+    #    carry their OWN data → the prior federates over per-client token streams.
+    #    (_build_client materializes a throwaway stage1 we immediately replace with s1.)
+    stage1_clients = []
+    for e in entities:
+        c = _build_client(cfg, e, device, collect_stats=False)
+        c.model = s1                                          # SHARE the pooled tokenizer
+        stage1_clients.append(c)
+
+    # 3) FedSGD/τ prior with the server optimizer — the identical federated_stage2 call
+    #    federated_fedsgd uses, so `pooltok − fedsgd` isolates the tokenizer cleanly.
+    s2_clients, _, _ = federated_stage2(stage1_clients, cfg, rounds=s2_rounds,
+                                        local_epochs=local_epochs, seed=seed, local_prefixes=(),
+                                        tau_steps=tau_steps, server_opt=server_opt, server_lr=server_lr)
+    return {c.entity_id: (c.s2.stage1, c.s2) for c in s2_clients}
+
+
+def train_pooltok_centralprior(cfg, entities, data_by_e, s1_epochs, prior_steps, device,
+                               seed: int = 7, batch: int = 16,
+                               tok_cache_dir: "str | Path | None" = None) -> dict:
+    """Cell C of the tokenizer×prior 2×2 — isolate the PRIOR term cleanly.
+
+    The SAME cached POOLED tokenizer as `federated_fedsgd_pooltok` (bit-identical, loaded from
+    cache), FROZEN, with a POOLED (centralized) prior trained STEP-based at the same
+    optimizer-update budget (`prior_steps`) and the same effective per-update batch
+    (K clients × `batch`) as the τ=1 FedSGD prior. So:
+
+        C − pooltok = pure PRIOR-FEDERATION penalty (identical tokenizer AND identical budget)
+
+    This is the one comparison that removes the budget/batch confound between `centralized`
+    (batch 128, epoch-based) and the FedSGD sweep. C ≈ pooltok ⇒ the prior federates losslessly
+    and the local→centralized gap was a budget artifact; C ≫ pooltok ⇒ a real pooled-prior
+    advantage the FedSGD prior cannot capture."""
+    loader = _pooled_loader(cfg, entities, data_by_e)
+    ex = next(iter(loader))["inputs"][:1]
+    s1 = _materialized_stage1(cfg, ex, device, collect_stats=False)
+    cache = (Path(tok_cache_dir) / f"pooltok_seed{seed}_s1e{s1_epochs}.pt") if tok_cache_dir else None
+    if cache is not None and cache.exists():
+        s1.load_state_dict(torch.load(cache, map_location=device))
+        s1.to(device)
+        print(f"[centralprior] loaded cached pooled tokenizer <- {cache}")
+    else:
+        _train_stage1(s1, loader, s1_epochs, cfg.training.lr, device, tag="pooltok")
+        if cache is not None:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(s1.state_dict(), cache)
+            print(f"[centralprior] cached pooled tokenizer -> {cache}")
+    s1.eval()
+
+    # Pooled prior at effective batch = K×`batch`, matching the τ=1 FedSGD per-update batch
+    # (one `batch`-sized minibatch per client, aggregated) and update count (`prior_steps`).
+    K = len(entities)
+    ds = ConcatDataset([data_by_e[e].train_dataset for e in entities])
+    ploader = _build_loader(ds, K * batch, cfg.dataset.num_workers, shuffle=True)
+    pex = next(iter(ploader))["inputs"][:1]
+    print(f"[centralprior] frozen pooled tokenizer; POOLED prior {prior_steps} steps "
+          f"@ effective batch {K}×{batch}={K * batch} on {len(ds)} pooled windows")
+    s2 = _build_train_stage2_steps(cfg, s1, ploader, prior_steps, cfg.training.lr, device, pex, tag="central")
+    return {e: (s1, s2) for e in entities}
+
+
+# ─── per-client detection via the existing pipeline ──────────────────────────
+
+def save_client_ckpts(cfg, entity, stage1, s2, scratch: Path) -> tuple[Path, Path]:
+    c = copy.deepcopy(cfg); c.dataset.entity_id = entity
+    d = scratch / entity; d.mkdir(parents=True, exist_ok=True)
+    s1p, s2p = d / "stage1.ckpt", d / "stage2.ckpt"
+    save_stage1_checkpoint(s1p, stage1, c, 0, 0)
+    save_stage2_checkpoint(s2p, s2, c, 0, 0)
+    return s1p, s2p
+
+
+def eval_from_ckpts(cfg, entity, s1p: Path, s2p: Path, scratch: Path) -> dict:
+    c = copy.deepcopy(cfg); c.dataset.entity_id = entity
+    d = scratch / entity; d.mkdir(parents=True, exist_ok=True)
+    report = detect.detect(c, stage1_ckpt=s1p, stage2_ckpt=s2p, output_dir=d)
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    return report
+
+
+def _aggregate(reports, keys: list[str]) -> dict[str, dict]:
+    """Mean / std / worst (min) for each metric, pooled over an iterable of
+    per-client report dicts (across clients AND seeds)."""
+    rlist = list(reports)
+    out = {}
+    for k in keys:
+        vals = [float(r[k]) for r in rlist
+                if isinstance(r.get(k), (int, float)) and np.isfinite(r.get(k))]
+        if vals:
+            out[k] = {"mean": float(np.mean(vals)), "std": float(np.std(vals)),
+                      "worst": float(np.min(vals)), "n": len(vals)}
+    return out
+
+
+@torch.no_grad()
+def cf_fidelity_from_ckpts(cfg, entity, s1p: Path, s2p: Path, device,
+                           score_quantile: float = 0.9, max_windows: int = 24) -> dict:
+    """Counterfactual quality vs the TRUE clean test signal (x_clean).
+
+    Reloads the trained model, generates counterfactuals for the test windows
+    that overlap an injected anomaly, decodes them, and compares against
+    test_clean using the per-channel-per-timestep deviation mask. Everything is
+    done in the per-entity z-scored space the model was trained in.
+
+    Requires a ground-truth clean signal, so it is defined only for the synthetic
+    builds. On a real dataset (wsd_fed) `test_clean/` does not exist — there is no
+    counterfactual to score against — and every CF key comes back NaN, exactly as
+    it already does when a client's anomalies all sit at the series boundary."""
+    root = resolve_path(cfg.paths.raw_data) / cfg.dataset.name
+    if not (root / "test_clean").exists() or not (root / "test_mask").exists():
+        return {k: float("nan") for k in CF_KEYS}
+    train = np.load(root / "train" / f"{entity}.npy").astype(np.float32)
+    test = np.load(root / "test" / f"{entity}.npy").astype(np.float32)
+    clean = np.load(root / "test_clean" / f"{entity}.npy").astype(np.float32)
+    mask = np.load(root / "test_mask" / f"{entity}.npy").astype(bool)        # (T, C)
+
+    mu, sd = train.mean(0, keepdims=True), train.std(0, keepdims=True) + 1e-8  # per_entity_standard
+    xs = (test - mu) / sd
+    cs = (clean - mu) / sd
+    W = cfg.dataset.window_length
+    T = xs.shape[0]
+
+    cand = list(range(0, max(1, T - W + 1), max(1, W // 2)))
+    sel = [s for s in cand if mask[s:s + W].any()]
+    if not sel:                                                  # anomalies only near the boundary
+        anom_t = np.where(mask.any(axis=1))[0]
+        sel = sorted({int(np.clip(t - W // 2, 0, T - W)) for t in anom_t})
+    sel = sel[:max_windows]
+    if not sel:
+        return {k: float("nan") for k in CF_KEYS}
+
+    c = copy.deepcopy(cfg); c.dataset.entity_id = entity
+    example = torch.tensor(xs[:W].T, dtype=torch.float32)[None]   # (1, C, W) CPU for materialize
+    s2 = load_stage2(s2p, c, stage1_ckpt=s1p, stage1_example_inputs=example, device=device)
+
+    xb = np.stack([xs[s:s + W].T for s in sel])                  # (n, C, W)
+    out = counterfactual(s2, torch.tensor(xb, dtype=torch.float32, device=device),
+                         score_quantile=score_quantile, greedy=True)
+    cf = out["x_cf"].detach().cpu().numpy()                      # (n, C, W)
+
+    repair_num = repair_den = disturb_sum = disturb_cnt = 0.0
+    for i, s in enumerate(sel):
+        cw = cs[s:s + W].T                                       # (C, W) scaled clean
+        xw = xs[s:s + W].T                                       # (C, W) scaled test
+        mw = mask[s:s + W].T                                     # (C, W) bool
+        a, cl = mw, ~mw
+        repair_num += np.abs(cf[i] - cw)[a].sum()
+        repair_den += np.abs(xw - cw)[a].sum()                  # anomaly magnitude
+        disturb_sum += np.abs(cf[i] - cw)[cl].sum()
+        disturb_cnt += cl.sum()
+
+    del s2
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    ratio = float(repair_num / repair_den) if repair_den > 1e-8 else float("nan")
+    return {
+        "cf_repair_ratio": ratio,
+        "cf_repair_improvement": (1.0 - ratio) if np.isfinite(ratio) else float("nan"),
+        "cf_disturb_mae": float(disturb_sum / disturb_cnt) if disturb_cnt > 0 else float("nan"),
+        "cf_n_windows": float(len(sel)),
+    }
+
+
+def _git_provenance() -> dict:
+    """Stamp the code state into the run so the camera-ready table ties to a commit."""
+    import subprocess
+    root = str(Path(__file__).resolve().parent.parent)
+    try:
+        sha = subprocess.check_output(["git", "-C", root, "rev-parse", "HEAD"], text=True).strip()
+        dirty = bool(subprocess.check_output(["git", "-C", root, "status", "--porcelain"], text=True).strip())
+        return {"commit": sha, "dirty": dirty}
+    except Exception:
+        return {"commit": None, "dirty": None}
+
+
+def _arm_tag(arm: str, fed: dict | None) -> str:
+    """Artefact directory name for one (arm, knob-setting). Plain `arm` when it has no
+    swept knobs, so every existing arm's path is unchanged."""
+    if not fed:
+        return arm
+    bits = []
+    if "mu" in fed:
+        bits.append(f"mu{fed['mu']:g}" + ("" if fed.get("form") == "loss" else "_dec"))
+    if "lambda" in fed and fed.get("lambda"):
+        bits.append(f"lam{fed['lambda']:g}_{fed.get('agg', 'uniform')}")
+        if fed.get("code_weight") == "count":
+            bits.append("cwcount")
+        if fed.get("hybrid_fedavg"):
+            bits.append("hybrid")
+        if not fed.get("seed_round0", True):
+            bits.append("noseed")
+    if fed.get("scope") not in (None, "full"):
+        # split_at only means anything for 'partial', but two 'partial' runs that differ
+        # ONLY by it would otherwise share a directory and silently overwrite each other.
+        bits.append(str(fed["scope"])
+                    + (f"{fed.get('enc_split_at')}" if fed["scope"] == "partial" else ""))
+    if fed.get("bn") not in (None, "buffers_local"):
+        bits.append(f"bn-{fed['bn']}")
+    if fed.get("sched") not in (None, "none"):
+        bits.append(f"sched-{fed['sched']}")
+    if fed.get("cb") not in (None, "suffstat"):
+        bits.append(f"cb-{fed['cb']}")
+    if fed.get("prior") not in (None, "local"):
+        bits.append(f"prior-{fed['prior']}")
+    return "_".join([arm, *bits]) if bits else arm
+
+
+def _structural_echo(cfg: Config, stage1, s2, fed: dict | None = None, models: dict | None = None) -> dict:
+    """Knobs REQUESTED (cfg) vs REALIZED (MEASURED off the built tensors, never cfg).
+
+    cfg.encoder.dim=64 sat in cfg for the whole life of the fork while the conv body was
+    hardcoded to 4, so a cfg-only echo records the intent and certifies the lie. `requested`
+    != `realized` is the only machine-checkable evidence that a knob actually threaded --
+    a `--width-base 16` run that still reports encoder_n_params=5,256 is the false null, caught.
+    Known-good: wb4 -> body 4/8/16, encoder 5,256, stage1 85,546; wb16 -> 16/32/64, 74,568, 352,666.
+
+    Crash-proof by construction: every field is guarded, so a wrong introspection path degrades
+    to None rather than killing a run whose training already completed.
+    """
+    def _try(fn):
+        try:
+            return fn()
+        except Exception:
+            return None
+    enc = getattr(stage1, "encoder", None)
+    prior = getattr(s2, "prior", None)
+    realized = {
+        "encoder_conv_out_channels": _try(lambda: [int(m.out_channels) for m in enc.modules()
+                                                   if isinstance(m, torch.nn.Conv2d)]),
+        "encoder_n_params": _try(lambda: sum(p.numel() for p in enc.parameters())),
+        "stage1_n_params": _try(lambda: sum(p.numel() for p in stage1.parameters())),
+        "prior_n_params": _try(lambda: sum(p.numel() for p in prior.parameters())),
+    }
+    if fed and models:
+        # The machine-checkable proof that the arm did what its name says: EXACTLY 0 for
+        # any arm that weight-averages the encoder, > 0 for one that does not (fedproto,
+        # commoninit). A fedproto row reporting 0 here would be a mislabelled FedAvg.
+        # Added only for arms that federate an encoder, so every other arm's knobs.json
+        # keeps exactly the fields it had.
+        from federated import _encoder_shared_keys       # local: avoids an import cycle at module load
+
+        def _delta():
+            keys = _encoder_shared_keys(stage1, fed.get("scope", "full"),
+                                        int(fed.get("enc_split_at", 2)),
+                                        fed.get("bn", "buffers_local"))
+            sds = [m[0].state_dict() for m in
+                   {id(v[0]): v for v in models.values()}.values()]   # one entry per DISTINCT model
+            if len(sds) < 2:
+                return 0.0
+            ref = sds[0]
+            return max(float((sd[k].detach().float().cpu() - ref[k].detach().float().cpu())
+                             .abs().max()) for sd in sds[1:] for k in keys)
+        realized["enc_shared_tensors"] = _try(lambda: len(
+            _encoder_shared_keys(stage1, fed.get("scope", "full"),
+                                 int(fed.get("enc_split_at", 2)), fed.get("bn", "buffers_local"))))
+        realized["enc_max_cross_client_delta"] = _try(_delta)
+    return {
+        "requested": {
+            "encoder.width_base": getattr(cfg.encoder, "width_base", None),
+            "quantizer.token_embedding_dim": cfg.quantizer.token_embedding_dim,
+            "quantizer.codebook_size": cfg.quantizer.codebook_size,
+            "quantizer.name": cfg.quantizer.name,
+            "prior.embed_dim": cfg.prior.embed_dim,
+            "prior.hidden_dim": cfg.prior.hidden_dim,
+            "prior.heads": cfg.prior.heads,
+            "prior.dropout": cfg.prior.dropout,
+            "dataset.window_length": cfg.dataset.window_length,
+        },
+        "realized": realized,
+        "amp_dtype": (str(_amp_dtype()).replace("torch.", "") if _amp_dtype() is not None else "fp32"),
+        # Federation knobs that live in argv rather than cfg (e.g. the encoder-federation
+        # trio's μ / λ / aggregation). None for arms that have none.
+        **({"federation": fed} if fed else {}),
+    }
+
+
+def main() -> int:
+    force_utf8_stdout()
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--dataset", type=str, default="toy_fed_uni")
+    p.add_argument("--clients", type=str, default=None,
+                   help="comma-separated entity ids; default = every entity on disk")
+    p.add_argument("--eval-clients", type=str, default=None,
+                   help="comma-separated subset of the TRAINED clients to score. Default "
+                        "= score all of them. Use when a pooled arm trains on far more "
+                        "series than have a matched `local` counterpart (e.g. centralized "
+                        "over all 248 UCR series, scored only on the 3 that also have a "
+                        "local model): each skipped client saves a full detection pass.")
+    p.add_argument("--cluster", type=str, default=None,
+                   help="run the comparison on ONE machine-type cluster (needs clusters.json, "
+                        "e.g. toy_fed_uni). Overrides --clients; artifacts land under "
+                        "<out-dir>/<cluster>/. This is the intended unit of federation for the "
+                        "univariate benchmark.")
+    p.add_argument("--arms", type=str, default="local,centralized,federated")
+    p.add_argument("--s1-epochs", type=int, default=2)      # local/centralized stage1
+    p.add_argument("--s2-epochs", type=int, default=2)      # local/centralized stage2
+    p.add_argument("--protocol", choices=["fixed", "converged"], default="fixed",
+                   help="Training recipe for the local/centralized BASELINES. "
+                        "'fixed' (default, unchanged) = --s1-epochs/--s2-epochs, no "
+                        "validation. 'converged' = the run.py recipe: warmup+cosine LR, "
+                        "fp32 val pass every epoch, step-based early stopping, best-on-val "
+                        "weights; the epoch flags are then ignored. NOTE the federated "
+                        "arms still train on a FIXED round budget either way — see the "
+                        "warning printed when both are selected.")
+    p.add_argument("--s1-rounds", type=int, default=2)      # federated stage1
+    p.add_argument("--s2-rounds", type=int, default=2)      # federated stage2
+    p.add_argument("--local-epochs", type=int, default=1)   # federated local epochs/round
+    p.add_argument("--cb-server-ema-decay", type=float, default=None,
+                   help=f"server-side codebook EMA decay γ for the 'federated_cb_only_ema' arm. "
+                        f"Default (unset) = {_CB_SERVER_EMA_DEFAULT_DECAY} (round-granularity rate; "
+                        f"NOT cfg.quantizer.ema_decay=0.99, a within-step rate). γ=0 reproduces the "
+                        f"plain 'federated_cb_only' merge.")
+    p.add_argument("--anchor-weight", type=float, default=1.0,
+                   help="FedProto encoder-anchor lambda for the 'federated_anchor' arm (0 = off).")
+    p.add_argument("--align-weight", type=float, default=0.5,
+                   help="B1 probe-alignment lambda for the 'federated_align' arm (0 = off).")
+    p.add_argument("--pool-cap", type=int, default=0,
+                   help="centralized_cap: cap the pooled training set to N diverse windows (0 = no cap).")
+    p.add_argument("--proto-weight", type=float, default=1.0,
+                   help="federated_protoprior: λ on the prior-prototype KL consensus term.")
+    p.add_argument("--proto-probe-windows", type=int, default=1024,
+                   help="federated_protoprior: shared probe size for the consensus prototype.")
+    p.add_argument("--tau-steps", type=int, default=0,
+                   help="federated_fedsgd: optimizer STEPS per round (τ). 0 = epoch-based (other arms).")
+    p.add_argument("--server-opt", type=str, default="sgd", choices=["sgd", "fedadam"],
+                   help="federated_fedsgd server optimizer over the pseudo-gradient.")
+    p.add_argument("--server-lr", type=float, default=0.01, help="FedAdam server step size η.")
+    p.add_argument("--server-momentum", type=float, default=0.9,
+                   help="FedAvgM server momentum for the 'federated_fedavgm' arm (0 = plain FedAvg).")
+    p.add_argument("--batch", type=int, default=None,
+                   help="override BOTH stage batch sizes with one value. Default (unset) "
+                        "keeps cfg.dataset.batch_size_stage1/stage2 (256/128) -- i.e. the "
+                        "run.py recipe. This used to default to 16 and clobber the config "
+                        "unconditionally, which broke local-vs-pooled step parity: at "
+                        "batch 16 the `min_epochs` floor raises the pooled arm's step cap "
+                        "3.4x above a local client's, so the skyline outspent the baseline.")
+    # ── Point 1: shared-codebook CAPACITY sweep ──────────────────────────────
+    p.add_argument("--codebook-size", type=int, default=0,
+                   help="override cfg.quantizer.codebook_size (0 = config default 64). Capacity test.")
+    p.add_argument("--token-dim", type=int, default=0,
+                   help="override cfg.quantizer.token_embedding_dim (= encoder/decoder latent dim; "
+                        "0 = config default 4). Capacity test.")
+    # ── B1: architecture knobs that were UNREACHABLE from this CLI ───────────
+    # Sentinel is None, not 0: `--prior-dropout 0` is a LEGITIMATE setting (dropout off),
+    # so the falsy-0 sentinel used by --token-dim above would silently ignore it.
+    p.add_argument("--width-base", type=int, default=None,
+                   help="override cfg.encoder.width_base, the encoder/decoder conv body base width "
+                        "(None = config default 4 -> body 4/8/16; 16 -> 16/32/64 = upstream).")
+    p.add_argument("--prior-embed-dim", type=int, default=None,
+                   help="override cfg.prior.embed_dim AND cfg.prior.hidden_dim together "
+                        "(None = config default 128). Must be divisible by cfg.prior.heads.")
+    p.add_argument("--prior-hidden-dim", type=int, default=None,
+                   help="override cfg.prior.hidden_dim alone (FFN width = 4*hidden_dim). Applied "
+                        "AFTER --prior-embed-dim, so pass both to decouple d_model from the FFN.")
+    p.add_argument("--prior-dropout", type=float, default=None,
+                   help="override cfg.prior.dropout (None = config default 0.2; 0.0 = disable).")
+    # ── High-frequency-precision levers (each no-op at its default; orthogonal) ──
+    p.add_argument("--spec-weight", type=float, default=None,
+                   help="Lever 1: weight of the STFT-domain loss in the Stage-1 backprop total "
+                        "(None = config default 0.0 = off). Adds a high-frequency-aware objective.")
+    p.add_argument("--downsampled-width", type=int, default=None,
+                   help="Lever 2: cfg.encoder.downsampled_width, the latent time resolution "
+                        "(None = config default 32; higher = less temporal compression).")
+    p.add_argument("--n-fft", type=int, default=None,
+                   help="Lever 3: cfg.transform.n_fft, STFT window (None = config default 4 -> 3 "
+                        "freq bins; higher = finer frequency resolution).")
+    p.add_argument("--refine-mode", type=str, default=None, choices=["linear", "conv"],
+                   help="Lever 4: RefinementHead architecture (None = config default 'linear').")
+    # ── Point 2: residual (multi-stage) shared VQ ────────────────────────────
+    p.add_argument("--quantizer", type=str, default="",
+                   help="override cfg.quantizer.name; 'residual_shared_codebook_per_channel_vq' "
+                        "enables Residual-VQ (coarse+fine shared codebooks). '' = config default.")
+    p.add_argument("--n-stages", type=int, default=0,
+                   help="Residual-VQ: number of stages (0 = config default 2). Effective capacity "
+                        "= K^n_stages cells with n_stages*K codewords.")
+    # ── Point 3: alignment-neck sweep ────────────────────────────────────────
+    p.add_argument("--enc-split-at", type=int, default=2,
+                   help="federated_enc_partial: keep the first N encoder blocks (raw-signal front-end) "
+                        "LOCAL, share the rest + the codebook-facing proj (the alignment neck). "
+                        "Higher N = less sharing (N=11 ≈ share only the last block).")
+    # ── encoder-federation trio: federated_enc_{fedavg,fedprox,fedproto} ──────────
+    p.add_argument("--fed-enc-scope", type=str, default="full",
+                   choices=["full", "partial", "neck"],
+                   help="WHICH encoder tensors the trio federates. 'full' (default) = the whole "
+                        "encoder; 'partial'/'neck' reuse the alignment-neck split (--enc-split-at).")
+    p.add_argument("--fed-enc-bn", type=str, default="buffers_local",
+                   choices=["buffers_local", "fedbn", "shared"],
+                   help="BatchNorm regime. 'buffers_local' (default) shares the AFFINE parameters "
+                        "(gamma/beta) and keeps only the running statistics local — this is NOT "
+                        "FedBN, despite what an earlier version of this help text said. 'fedbn' "
+                        "keeps the WHOLE BN layer local (gamma, beta and statistics), which is what "
+                        "FedBN (Li et al., ICLR 2021) actually specifies. 'shared' federates the "
+                        "statistics too, POOLED by the law of total variance rather than averaged. "
+                        "`num_batches_tracked` stays local in every mode (int64 counter).")
+    p.add_argument("--fed-enc-cb", type=str, default="suffstat", choices=["suffstat", "local"],
+                   help="the VQ CODEBOOK for the trio. 'suffstat' (default) federates it by the "
+                        "Prop.1 sufficient-statistic merge; 'local' never federates it at all — "
+                        "each client k-means-seeds and EMA-updates its own dictionary exactly as "
+                        "the `local` baseline does, so ONLY the encoder crosses the network. "
+                        "Incompatible with federated_enc_fedproto, whose classes ARE the shared "
+                        "codebook indices (see the error message for why).")
+    p.add_argument("--fed-patience-rounds", type=int, default=0,
+                   help="stop the federated stage-1 loop once the cohort validation loss has "
+                        "not improved for N consecutive rounds (0 = off, every arm on disk). "
+                        "Needs --protocol converged, which is what turns the per-round "
+                        "validation on. Lets a generous --s1-rounds be requested safely: the "
+                        "run halts where it actually flattens and logs CONVERGED.")
+    p.add_argument("--resume-from", type=str, default=None,
+                   help="CONTINUE a finished federated run instead of restarting it. Point at "
+                        "the arm directory of that run (…/seed<N>/<arm-tag>/, the one holding "
+                        "one sub-directory per client). --s1-rounds then means ADDITIONAL "
+                        "rounds. Model + full VQ state always restore; the optimizer/scaler "
+                        "restore only if that run wrote `_fed_resume.pt` (runs from this "
+                        "version onward do). Single (arm, seed) only — see the guard.")
+    p.add_argument("--resume-rounds-done", type=int, default=0,
+                   help="for a WEIGHTS-ONLY --resume-from (a source run that predates the resume "
+                        "bundle): how many rounds that run completed. Only affects LABELLING — "
+                        "round indices in the log and in fed_history.json continue from there "
+                        "instead of restarting at 0, so a continuation cannot be misread as a "
+                        "fresh run. Ignored when the source has a full bundle (it knows).")
+    p.add_argument("--fed-enc-sched", type=str, default="none", choices=["none", "cosine"],
+                   help="stage-1 LR schedule for the trio. 'none' (default) = constant LR, what "
+                        "every federated arm on disk used — keeps the trio comparable with "
+                        "federated_cb_only. 'cosine' = warmup+cosine over the full budget, the "
+                        "recipe `local`/`centralized` get — use it when the comparison is against "
+                        "`local`, so the gap measures federation and not the training recipe. "
+                        "Pick one per table; never mix them in one table.")
+    p.add_argument("--fed-enc-prior", type=str, default="local",
+                   choices=["local", "partial", "shared"],
+                   help="stage-2 prior pairing for the trio. 'local' (default) keeps the ENTIRE prior "
+                        "per-client so stage 1 is the only federated surface -> clean attribution; "
+                        "'partial' = the main method's personalization; 'shared' = FedAvg the whole prior.")
+    p.add_argument("--fedprox-mu", type=float, default=0.01,
+                   help="FedProx μ: local objective gains (μ/2)‖w − w^t‖² over the shared encoder "
+                        "parameters. μ=0 reduces exactly to FedAvg. NOT comparable to a FedProx-paper μ "
+                        "(the local optimizer here is a persistent AdamW, not SGD) — sweep it.")
+    p.add_argument("--fedprox-form", type=str, default="loss", choices=["loss", "decoupled"],
+                   help="'loss' = the FedProx paper's objective (the prox gradient goes through "
+                        "AdamW's preconditioner, so small μ can be a NO-OP — watch prox_grad_ratio). "
+                        "'decoupled' = AdamW-style post-step contraction w += lr·μ·(w^t − w), where "
+                        "μ literally means 'fraction of drift removed per step'.")
+    p.add_argument("--fedproto-weight", type=float, default=1.0,
+                   help="FedProto λ: weight of the per-code prototype pull mean_k‖μ_k(batch) − p̄_k‖². "
+                        "λ=0 leaves the encoder unfederated (no weight averaging either) — that is the "
+                        "arm's own null, NOT `local` (the codebook is still federated).")
+    p.add_argument("--fedproto-agg", type=str, default="uniform", choices=["uniform", "count"],
+                   help="prototype aggregation. 'uniform' (default) = one vote per client, a target "
+                        "that DIFFERS from the merged codebook. 'count' = paper-faithful weighting, "
+                        "which here equals the Prop.1 codebook — the degeneracy ablation.")
+    p.add_argument("--fedproto-code-weight", type=str, default="uniform",
+                   choices=["uniform", "count"],
+                   help="how the per-code errors are weighted IN THE LOSS (independent of "
+                        "--fedproto-agg, which sets the target). 'uniform' = one weight per code "
+                        "(pure between-class, but amplifies rare codes — and rare codes are the "
+                        "anomaly signal); 'count' = token-frequency weighting, commitment's own.")
+    p.add_argument("--fedproto-no-seed", action="store_true",
+                   help="do NOT seed round-0 prototypes from the broadcast codebook. Round 0 then "
+                        "has no prototype term at all, so the encoder is federated in rounds-1 of "
+                        "the rounds its siblings get. Ablation only.")
+    p.add_argument("--fedproto-fedavg", action="store_true",
+                   help="hybrid ablation: prototype pull AND weight averaging (FedProto is "
+                        "prototype-ONLY by definition; this measures whether they compose).")
+    # ── Paper-faithful window: TimeVQVAE-AD Algorithm 1 uses T = 2 x period ──────
+    # arXiv 2311.12550v5 defines the rolling window from the SERIES' period, not as a
+    # fixed hyperparameter ("Define a period length P of x*", then "x in R^T, T = 2P").
+    # config.py fixes window_length=128 for every dataset (the period override was
+    # removed for wsd_fed, where 2P=2880 would have dropped 31 clients to 18). On UCR
+    # that removes the paper's protocol: measured over the archive, the median series
+    # sees 128/period = 0.77 CYCLES where the paper prescribes 2.0, and on ZERO of the
+    # 250 series is 128 the right value.
+    p.add_argument("--window-length", type=int, default=None,
+                   help="override cfg.dataset.window_length (None = config default 128). "
+                        "Pass 2*period to reproduce the paper's T=2P. NB this also rescales "
+                        "the detection stride (eval_stride_rate=0.1 of the window, which IS "
+                        "the paper's rule) and, unless --metrics-tolerance is given, the "
+                        "VUS/PATE/top-k buffer (window//2) -- pin that to keep tables "
+                        "comparable across window settings.")
+    p.add_argument("--metrics-tolerance", type=int, default=None,
+                   help="override cfg.evaluation.paper_metrics_tolerance, the VUS/PATE buffer "
+                        "AND the top-k hit radius. Applied AFTER apply_dataset_overrides, so it "
+                        "beats both metadata.json and the window-derived default. REQUIRED "
+                        "alongside --window-length for a clean A/B: otherwise the window moves "
+                        "the metric's own yardstick and the two effects cannot be separated.")
+    p.add_argument("--seeds", type=str, default="0", help="comma-separated seeds; pooled for mean±std.")
+    p.add_argument("--out-json", type=str, default=None, help="write the summary dict to this path.")
+    p.add_argument("--out-dir", type=str, default=None,
+                   help="root for per-client checkpoints + detect reports/plots "
+                        "(default: artifacts/fed_eval/<dataset>).")
+    args = p.parse_args()
+
+    cfg = Config()
+    cfg.dataset.name = args.dataset
+    if args.batch:                  # unset ⇒ keep the config's 256/128 (the run.py recipe)
+        cfg.dataset.batch_size_stage1 = args.batch
+        cfg.dataset.batch_size_stage2 = args.batch
+    # data.make_dataloaders honours DEBUG_NUM_WORKERS on its own, but `_pooled_loader`
+    # and `_restage2_loader` build loaders straight from `cfg.dataset.num_workers`, so
+    # without this the env var would silently cover only part of the run. Folding it
+    # into cfg here makes ONE knob govern every loader this process creates.
+    _nw = os.environ.get("DEBUG_NUM_WORKERS")
+    if _nw:
+        cfg.dataset.num_workers = int(_nw)
+        print(f"[config] num_workers={cfg.dataset.num_workers} (env DEBUG_NUM_WORKERS)")
+    # We build Config() directly (dataset.name comes from argv), so the metadata.json
+    # overrides load_config() would have applied must be applied explicitly. This used
+    # to be a hand-copy of the tolerance rule only, which ignored `metrics_tolerance`.
+    apply_dataset_overrides(cfg)
+    apply_env_overrides(cfg)   # AMP / SCORE_MASK_CHUNK / DETECT_AMP were silently dropped here
+    # Point 1 — override VQ capacity (K, D) for the shared-codebook capacity sweep.
+    # token_embedding_dim wires encoder/quantizer/decoder together; codebook_size wires
+    # the quantizer + the stage-2 prior vocab. The suff-stat merge is K-agnostic.
+    if args.codebook_size:
+        cfg.quantizer.codebook_size = int(args.codebook_size)
+    if args.token_dim:
+        cfg.quantizer.token_embedding_dim = int(args.token_dim)
+    # B1 — architecture knobs. embed_dim is d_model; the FFN is 4*hidden_dim
+    # (model/prior.py), so --prior-embed-dim drags hidden_dim to keep the shipped 4x ratio;
+    # pass --prior-hidden-dim after it to decouple.
+    if args.width_base is not None:
+        cfg.encoder.width_base = int(args.width_base)
+    if args.prior_embed_dim is not None:
+        cfg.prior.embed_dim = int(args.prior_embed_dim)
+        cfg.prior.hidden_dim = int(args.prior_embed_dim)
+    if args.prior_hidden_dim is not None:
+        cfg.prior.hidden_dim = int(args.prior_hidden_dim)
+    if args.prior_dropout is not None:
+        cfg.prior.dropout = float(args.prior_dropout)
+    # nn.MultiheadAttention asserts this deep into training; fail here, naming the knob.
+    if cfg.prior.embed_dim % cfg.prior.heads:
+        raise SystemExit(f"--prior-embed-dim {cfg.prior.embed_dim} is not divisible by "
+                         f"cfg.prior.heads={cfg.prior.heads}")
+    # High-frequency-precision levers (orthogonal; each no-op unless passed).
+    if args.spec_weight is not None:
+        cfg.decoder.spec_weight = float(args.spec_weight)
+    if args.downsampled_width is not None:
+        cfg.encoder.downsampled_width = int(args.downsampled_width)
+    if args.n_fft is not None:
+        cfg.transform.n_fft = int(args.n_fft)
+    if args.refine_mode is not None:
+        cfg.decoder.refine_mode = str(args.refine_mode)
+    # Point 2 — Residual-VQ selection.
+    if args.quantizer:
+        cfg.quantizer.name = args.quantizer
+    if args.n_stages:
+        cfg.quantizer.n_residual_stages = int(args.n_stages)
+    # Paper-faithful window (T = 2*period). Set BEFORE the tolerance below, because the
+    # window-derived tolerance default is window_length//2 and we want an explicit
+    # --metrics-tolerance to win over it.
+    if args.window_length is not None:
+        w = int(args.window_length)
+        if w < 8:
+            raise SystemExit(f"--window-length {w} is too small (STFT + 4 downsampling "
+                             f"stages need room); use >= 8.")
+        cfg.dataset.window_length = w
+        print(f"[config] window_length -> {w} "
+              f"(detection stride becomes {max(1, round(cfg.dataset.eval_stride_rate * w))})")
+    # AFTER apply_dataset_overrides (called above), so an explicit tolerance beats both
+    # metadata.json's `metrics_tolerance` and the window//2 fallback.
+    if args.metrics_tolerance is not None:
+        cfg.evaluation.paper_metrics_tolerance = int(args.metrics_tolerance)
+        print(f"[config] paper_metrics_tolerance PINNED to {args.metrics_tolerance} "
+              f"(VUS/PATE buffer + top-k radius); window//2 would have been "
+              f"{cfg.dataset.window_length // 2}")
+    elif args.window_length is not None:
+        print(f"[config] WARNING: --window-length without --metrics-tolerance. The buffer "
+              f"follows the window ({cfg.dataset.window_length // 2}), so this run is NOT "
+              f"comparable to a different-window run on the same metric.")
+    entities = resolve_clients(cfg, args.clients, args.cluster)
+    # Train on `entities`, SCORE only `eval_entities`. Decouples the two because a
+    # pooled body can be worth training on hundreds of series while only a handful
+    # have a comparable `local` counterpart to be matched against -- scoring the rest
+    # costs a full detection pass each and answers nothing. Default: score everything.
+    eval_entities = entities
+    if args.eval_clients:
+        want = [e.strip() for e in args.eval_clients.split(",") if e.strip()]
+        unknown = [e for e in want if e not in entities]
+        if unknown:
+            raise SystemExit(f"--eval-clients not in the trained set: {unknown}")
+        eval_entities = want
+        print(f"[eval-scope] training on {len(entities)} client(s), "
+              f"scoring {len(eval_entities)}: {', '.join(eval_entities)}")
+    if not entities:
+        raise SystemExit(f"no clients resolved for {cfg.dataset.name}")
+    arms = [a.strip() for a in args.arms.split(",") if a.strip()]
+    # A HALF-converged table is worse than a fixed-budget one. `--protocol converged`
+    # only reaches the local/centralized baselines; the federated arms keep training on
+    # a fixed round budget (their inner loops interleave aggregation, so they cannot
+    # early-stop without a redesign). Mixing the two trains the BASELINES to convergence
+    # while capping the ARMS, which manufactures "federated < local" as an artifact of
+    # the budget rather than a property of federation -- and that is the headline claim.
+    if args.protocol == "converged":
+        # federated_cb_only IS converged-capable now (select_on_val stage1 + per-client
+        # converged prior), so it is a FAIR comparison and exempt from the warning. Any
+        # OTHER federated arm still trains its shared body on a fixed round budget.
+        _CONVERGED_FED = {"federated_cb_only", "federated_cb_only_ema",
+                          "federated_cb_only_ema_norevive"}
+        # The encoder-federation trio inherits cb_only's converged treatment ONLY when its
+        # prior is fully local (--fed-enc-prior local): that is the configuration in which
+        # `train_federated` takes the per-client converged prior path. With a partial/shared
+        # prior the shared body is back on a fixed round budget and the warning is correct.
+        if args.fed_enc_prior == "local":
+            _CONVERGED_FED |= {"federated_enc_fedavg", "federated_enc_fedprox",
+                               "federated_enc_fedproto", "federated_enc_commoninit"}
+        _fed_arms = [a for a in arms if a.startswith("federated") and a not in _CONVERGED_FED]
+        if _fed_arms:
+            print("\n" + "!" * 78)
+            print("!! WARNING: --protocol converged applies ONLY to local/centralized.")
+            print(f"!! These arms still use a FIXED budget: {', '.join(_fed_arms)}")
+            print("!! Baselines trained to convergence vs arms capped at "
+                  f"--s2-rounds={args.s2_rounds} is NOT a fair comparison; any "
+                  "'federated < local'")
+            print("!! read off this table would be a budget artifact. Run the baselines "
+                  "and the")
+            print("!! federated arms in SEPARATE tables, or keep --protocol fixed.")
+            print("!" * 78 + "\n", flush=True)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    scratch = (resolve_path(args.out_dir) if args.out_dir
+               else resolve_path("artifacts/fed_eval") / args.dataset)
+    # Separate roots per cluster: the same dataset hosts several independent
+    # federations, and they must not overwrite each other's checkpoints.
+    if args.cluster:
+        scratch = scratch / args.cluster
+    scratch.mkdir(parents=True, exist_ok=True)
+    print(f"[fed_eval] dataset={cfg.dataset.name} "
+          f"{'cluster=' + args.cluster + ' ' if args.cluster else ''}"
+          f"clients={entities}")
+
+    data_by_e = _loaders_for(cfg, entities)
+    seeds = [int(s) for s in args.seeds.split(",") if s.strip()]
+    pooled = {arm: [] for arm in arms}            # per-client reports pooled across seeds
+
+    for seed in seeds:
+        for arm in arms:
+            print(f"\n===== TRAIN arm={arm} seed={seed} =====")
+            seed_everything(seed)                  # comparable init across arms within a seed
+            fed_echo = None                        # set by arms whose knobs are NOT in cfg
+            fed_hist: dict = {}                    # per-round federated telemetry sink
+            # A resume bundle belongs to ONE (arm, seed); loading it into a different arm or
+            # seed would silently mix optimizer states across conditions.
+            if args.resume_from and (len(arms) > 1 or len(seeds) > 1):
+                raise SystemExit("--resume-from takes a single (arm, seed): the checkpoints and "
+                                 "optimizer state it restores belong to one specific run. "
+                                 f"Got --arms {','.join(arms)} --seeds {args.seeds}.")
+            # The resume bundle must land NEXT TO the checkpoints it complements, so the
+            # destination is resolved before training rather than after it. `_arm_tag` needs
+            # `fed_echo`, which only the trio sets, so the pre-training value is the plain arm
+            # name; the post-training `sdir` below is the authoritative one and they agree for
+            # every arm that can be resumed (the trio's tag is added by the same call).
+            # Written to a provisional directory because the authoritative `sdir` depends on
+            # `_arm_tag(arm, fed_echo)`, and fed_echo is only known after the arm branch runs;
+            # the file is moved next to its checkpoints as soon as sdir exists (below).
+            _RESUME_CTX["from"] = args.resume_from
+            _RESUME_CTX["patience"] = args.fed_patience_rounds
+            _RESUME_CTX["rounds_done"] = args.resume_rounds_done
+            _RESUME_CTX["hist"] = fed_hist
+            _RESUME_CTX["out"] = scratch / f"seed{seed}" / "_resume_tmp"
+            # Effective codebook regime for THIS arm. Defaults to the flag; the
+            # commoninit_cb{shared,local} arms pin it and overwrite this below. Defined here,
+            # before the dispatch chain, so the `fed_hist["cb_mode"]` record further down is
+            # correct for every arm instead of echoing a flag the arm may have overridden.
+            cb_regime = args.fed_enc_cb
+            if arm == "local":
+                models = train_local(cfg, entities, data_by_e, args.s1_epochs, args.s2_epochs, device,
+                                     protocol=args.protocol)
+            elif arm == "centralized":
+                models = train_centralized(cfg, entities, data_by_e, args.s1_epochs, args.s2_epochs, device,
+                                           protocol=args.protocol)
+            elif arm == "centralized_cap":
+                # DIVERSITY vs QUANTITY probe: centralized on a small DIVERSE subsample
+                # (--pool-cap windows drawn across ALL clients) at the SAME data budget as
+                # one local client. > local ⇒ the centralized win is regularization/diversity,
+                # not raw volume (confirms "local overfits its narrow normal").
+                models = train_centralized(cfg, entities, data_by_e, args.s1_epochs, args.s2_epochs,
+                                           device, pool_cap=args.pool_cap, protocol=args.protocol)
+            elif arm == "federated":
+                models = train_federated(cfg, entities, args.s1_rounds, args.s2_rounds,
+                                         args.local_epochs, device, seed=seed)
+            elif arm == "federated_shared":
+                # (B)-ablation: FedAvg the WHOLE prior (no local head), with the SAME
+                # Prop.1 codebook federation as 'federated' held fixed. Measures ONLY
+                # the value of partial personalization. NOT a "naive FL" baseline — it
+                # keeps contribution (A), the sufficient-statistic codebook merge.
+                models = train_federated(cfg, entities, args.s1_rounds, args.s2_rounds,
+                                         args.local_epochs, device, seed=seed, local_prefixes=())
+            elif arm == "federated_fedavg_cb":
+                # (A)-ablation: naive weight-FedAvg of the codebook (vs the Prop.1
+                # sufficient-statistic merge), with the partially-personalized prior
+                # held at the main-method setting. Isolates the value of the merge.
+                models = train_federated(cfg, entities, args.s1_rounds, args.s2_rounds,
+                                         args.local_epochs, device, seed=seed, cb_merge="fedavg")
+            elif arm == "federated_anchor":
+                # ABLATION (c): the full recipe (A+B) PLUS the FedProto encoder
+                # anchor (lambda>0), which adds an extra pull of local encoders
+                # toward the frozen broadcast codebook. Tests whether the anchor
+                # raises cross-client index coherence (tok-agree) and at what cost
+                # to detection. lambda set by --anchor-weight (0 reduces to plain
+                # 'federated'). Codebook merge + partial personalization unchanged.
+                models = train_federated(cfg, entities, args.s1_rounds, args.s2_rounds,
+                                         args.local_epochs, device, seed=seed,
+                                         anchor_weight=args.anchor_weight)
+            elif arm == "federated_fedavg_whole":
+                # NAIVE-FL STRAWMAN: drops BOTH contributions — weight-FedAvg the
+                # codebook (no (A) suff-stat merge) AND FedAvg the whole prior (no
+                # (B) partial personalization). The "federate everything the obvious
+                # way" baseline; the gap to 'federated' is the value of the full
+                # recipe (A+B) together.
+                models = train_federated(cfg, entities, args.s1_rounds, args.s2_rounds,
+                                         args.local_epochs, device, seed=seed,
+                                         cb_merge="fedavg", local_prefixes=())
+            elif arm == "federated_cb_only":
+                # ISOLATES contribution (A) ALONE: Prop.1 sufficient-statistic codebook
+                # federation with the ENTIRE prior kept LOCAL — local_prefixes=("",) makes
+                # str.startswith(("",)) True for every key => 0 shared prior keys. Contrast
+                # vs 'local' = value of federating ONLY the codebook; contrast vs 'federated'
+                # = value of ALSO FedAvg-ing the prior body. Disentangles the two surfaces.
+                models = train_federated(cfg, entities, args.s1_rounds, args.s2_rounds,
+                                         args.local_epochs, device, seed=seed, local_prefixes=("",),
+                                         protocol=args.protocol)
+            elif arm == "federated_cb_only_ema":
+                # federated_cb_only PLUS a server-side codebook EMA: the server keeps a
+                # running EMA of the AGGREGATE suff-stats across rounds (C←γC+(1−γ)N,
+                # S←γS+(1−γ)M) and broadcasts e_j=S_j/smoothed(C_j) with C→ema_cluster_size,
+                # S→ema_embed_sum. Encoder/decoder/prior stay fully local (local_prefixes=("",)),
+                # exactly like cb_only. γ from --cb-server-ema-decay (default 0.8, a round-scale
+                # rate; γ=0 collapses to federated_cb_only). Tests server-memory vs memoryless merge.
+                gamma = (args.cb_server_ema_decay if args.cb_server_ema_decay is not None
+                         else _CB_SERVER_EMA_DEFAULT_DECAY)
+                models = train_federated(cfg, entities, args.s1_rounds, args.s2_rounds,
+                                         args.local_epochs, device, seed=seed, local_prefixes=("",),
+                                         cb_server_ema_decay=gamma, protocol=args.protocol)
+            elif arm == "federated_cb_only_ema_norevive":
+                # A-ABLATION of federated_cb_only_ema: server EMA ON but dead-code REVIVAL OFF.
+                # Hypothesis: the EMA memory already preserves a transiently-unused code (its
+                # accumulated S,C restore it next round via e_j=S/smoothed(C)), so noise-revival
+                # is redundant and may even fight the memory. cb_only (revive on, no memory) vs
+                # cb_only_ema (revive on, memory) vs this (no revive, memory) isolates whether
+                # the memory REPLACES revival. Same γ default as the parent arm.
+                gamma = (args.cb_server_ema_decay if args.cb_server_ema_decay is not None
+                         else _CB_SERVER_EMA_DEFAULT_DECAY)
+                models = train_federated(cfg, entities, args.s1_rounds, args.s2_rounds,
+                                         args.local_epochs, device, seed=seed, local_prefixes=("",),
+                                         cb_server_ema_decay=gamma, revive_dead=False,
+                                         protocol=args.protocol)
+            elif arm == "federated_enc":
+                # PROBE: federate the ENCODER too (whole stack) — align the tokenizer so the
+                # shared codebook is coherent. Decoder stays local, codebook = suffstat. Tests
+                # whether representation misalignment is what makes FL lose to local (and whether
+                # Prop.1 resurrects once its comparable-assignment precondition holds).
+                models = train_federated(cfg, entities, args.s1_rounds, args.s2_rounds,
+                                         args.local_epochs, device, seed=seed, fed_encoder="full")
+            elif arm == "federated_enc_partial":
+                # PROBE variant: share the LATE encoder blocks + ProjectBlock (codebook-facing
+                # map), keep the first `--enc-split-at` blocks (raw-signal front-end) LOCAL — align
+                # the representation while personalizing the input adapter. Sweep --enc-split-at
+                # for the alignment-neck curve (Point 3).
+                models = train_federated(cfg, entities, args.s1_rounds, args.s2_rounds,
+                                         args.local_epochs, device, seed=seed,
+                                         fed_encoder="partial", enc_split_at=args.enc_split_at)
+            elif arm == "federated_enc_neck":
+                # Point 3 (purest neck): share ONLY the codebook-facing projection (A_G),
+                # keep ALL encoder blocks local (H_k). Minimal shared alignment map.
+                models = train_federated(cfg, entities, args.s1_rounds, args.s2_rounds,
+                                         args.local_epochs, device, seed=seed,
+                                         fed_encoder="neck")
+            elif arm in ("federated_enc_fedavg", "federated_enc_fedprox",
+                         "federated_enc_fedproto", "federated_enc_commoninit",
+                         "federated_enc_commoninit_cbshared",
+                         "federated_enc_commoninit_cblocal",
+                         # ADDITIONS, not replacements: the cb-local twins of the two
+                         # weight-space algorithms. `federated_enc_fedproto_cblocal` is
+                         # deliberately ABSENT — FedProto aggregates one prototype per
+                         # codebook index, which only means something while index k denotes
+                         # the same thing on every client. That is a property of the method,
+                         # not a gap in this repo, and the paper should say so.
+                         "federated_enc_fedavg_cblocal",
+                         "federated_enc_fedprox_cblocal"):
+                # ── THE THREE-WAY ENCODER-FEDERATION COMPARISON ───────────────────────
+                # Same everything (suff-stat codebook merge, whole encoder shared, decoder
+                # local, stage-2 prior per --fed-enc-prior, same rounds/seeds/budget); the
+                # ONLY difference is HOW the encoder is federated:
+                #
+                #   federated_enc_fedavg   weight-space: server averages the encoder
+                #   federated_enc_fedprox  weight-space + local prox anchor (--fedprox-mu)
+                #   federated_enc_fedproto function-space: NO weight averaging, per-code
+                #                          prototype pull (--fedproto-weight/-agg)
+                #   federated_enc_commoninit_cbshared  common encoder init + the codebook
+                #                          STILL FEDERATED (Prop.1 merge, broadcast every
+                #                          round); the encoder is never synchronised again.
+                #   federated_enc_commoninit_cblocal   common encoder init and NOTHING else
+                #                          crosses the network: per-client k-means codebook,
+                #                          exactly the `local` baseline's quantizer.
+                #
+                # ⚠ `federated_enc_commoninit` (no suffix) is the LEGACY name and resolves to
+                # _cbshared. It was described in this file and in FED_ENCODER_ALGOS.md as
+                # "the null: common init, then every client trains alone" — which is WRONG,
+                # and the weights prove it: on ucr_162 the 5 clients' codebooks are
+                # BIT-IDENTICAL (max|Δ| = 0.0) while their encoders diverge (max|Δ| = 0.17).
+                # The codebook merge at federated.py:1458 is NOT gated on enc_fed_algo, so it
+                # runs for every arm in this branch. The un-suffixed arm therefore bundles TWO
+                # treatments — shared init AND a federated dictionary — and cannot isolate
+                # either. Kept working because a sweep may be mid-flight under the old name;
+                # use the explicit names for anything new.
+                #
+                # The one-axis null the old name promised is _cblocal: `local` plus a shared
+                # starting point, nothing else. Only against THAT can "FedAvg helps" be told
+                # apart from "a shared starting point helps".
+                #
+                # Default prior = FULLY LOCAL (--fed-enc-prior local), so stage 1 is the only
+                # thing federated and the contrast against `local`/`federated_cb_only` is a
+                # clean attribution to the encoder-federation algorithm. `partial`/`shared`
+                # reproduce the main-method / naive-FL prior pairings for the same three arms.
+                # `commoninit` IS fedproto with λ=0 and no averaging: the encoder is
+                # broadcast once and never synchronised again.
+                # Strip the codebook-regime suffix BEFORE reading the algorithm off the name,
+                # or `federated_enc_fedavg_cblocal`.rsplit("_")[1] resolves to "cblocal" and
+                # train_federated raises on an unknown algo.
+                base_arm = arm
+                for _sfx in ("_cbshared", "_cblocal"):
+                    if base_arm.endswith(_sfx):
+                        base_arm = base_arm[: -len(_sfx)]
+                is_null = "commoninit" in base_arm
+                algo = "fedproto" if is_null else base_arm.rsplit("_", 1)[1]
+                lam = 0.0 if is_null else args.fedproto_weight
+                # The null variants pin the codebook regime themselves; every other arm takes
+                # it from --fed-enc-cb. Pinning is the point: the whole reason these two names
+                # exist is that the regime must be legible from the arm id alone, not inferred
+                # from a flag that defaults to "suffstat" three files away.
+                cb_regime = args.fed_enc_cb
+                if arm.endswith("_cbshared"):
+                    cb_regime = "suffstat"
+                elif arm.endswith("_cblocal"):
+                    cb_regime = "local"
+                    # federated.py refuses a local codebook for fedproto only when
+                    # enc_proto_weight > 0; the null runs at lambda=0, so nothing to aggregate
+                    # by code id and the guard correctly does not fire.
+                # --fedproto-fedavg would otherwise turn the NULL control into plain FedAvg
+                # while the banner still says "never synchronised" — a silently corrupted
+                # control row is worse than no control row.
+                hybrid = bool(args.fedproto_fedavg) and not is_null
+                if cb_regime == "local" and args.fed_enc_prior != "local":
+                    raise SystemExit(
+                        f"--fed-enc-cb local with --fed-enc-prior {args.fed_enc_prior} is not "
+                        "meaningful. With per-client dictionaries the token ids are "
+                        "client-specific, and the prior's `token_embedding` is an "
+                        "nn.Embedding indexed BY CODE ID (model/prior.py): FedAvg-ing it "
+                        "averages embeddings of unrelated symbols — the same error the "
+                        "fedproto guard refuses, one level up. Use --fed-enc-prior local.")
+                prefixes = {"local": ("",), "partial": LOCAL_PRIOR_PREFIXES,
+                            "shared": ()}[args.fed_enc_prior]
+                # Self-documenting run: these knobs live in argv, NOT in cfg, so without this
+                # echo a knobs.json could not distinguish μ=0.01 from μ=1 after the fact.
+                fed_echo = {"algo": algo, "scope": args.fed_enc_scope, "bn": args.fed_enc_bn,
+                            "prior": args.fed_enc_prior, "cb": cb_regime,
+                            "sched": args.fed_enc_sched,
+                            "enc_split_at": args.enc_split_at,
+                            **({"mu": args.fedprox_mu, "form": args.fedprox_form}
+                               if algo == "fedprox" else {}),
+                            **({"lambda": lam, "agg": args.fedproto_agg,
+                                "code_weight": args.fedproto_code_weight,
+                                "seed_round0": not args.fedproto_no_seed,
+                                "hybrid_fedavg": hybrid}
+                               if algo == "fedproto" else {})}
+                models = train_federated(cfg, entities, args.s1_rounds, args.s2_rounds,
+                                         args.local_epochs, device, seed=seed,
+                                         local_prefixes=prefixes, cb_merge=cb_regime,
+                                         fed_encoder=args.fed_enc_scope, enc_split_at=args.enc_split_at,
+                                         enc_fed_algo=algo, enc_bn=args.fed_enc_bn,
+                                         enc_prox_mu=(args.fedprox_mu if algo == "fedprox" else 0.0),
+                                         enc_prox_form=args.fedprox_form,
+                                         enc_proto_weight=(lam if algo == "fedproto" else 0.0),
+                                         enc_proto_agg=args.fedproto_agg,
+                                         enc_proto_code_weight=args.fedproto_code_weight,
+                                         enc_proto_seed_round0=(not args.fedproto_no_seed),
+                                         enc_proto_fedavg=hybrid, enc_sched=args.fed_enc_sched,
+                                         protocol=args.protocol, out_history=fed_hist)
+            elif arm == "federated_fedavgm":
+                # ①: FedAvgM (server momentum on the prior pseudo-gradient) + small tau (run with
+                # --local-epochs 1 and more --s2-rounds). Rides the proven federated->centralized
+                # path; output_bias/channel_embedding stay LOCAL (fixes the calibration smear).
+                models = train_federated(cfg, entities, args.s1_rounds, args.s2_rounds,
+                                         args.local_epochs, device, seed=seed,
+                                         server_momentum=args.server_momentum)
+            elif arm == "federated_protoprior":
+                # FedProto AT THE PRIOR LEVEL: frozen suff-stat tokenizer; per-client prior
+                # trained on OWN data + λ·KL toward the ensemble-consensus predictive
+                # distribution on a shared probe (a function-space prototype). No weight
+                # averaging. Deploy = personalized per-client prior. Null (λ=0) = cb_only.
+                models = train_federated(cfg, entities, args.s1_rounds, args.s2_rounds,
+                                         args.local_epochs, device, seed=seed,
+                                         proto_weight=args.proto_weight,
+                                         proto_probe_windows=args.proto_probe_windows)
+            elif arm == "federated_fedsgd":
+                # #2 (R1-vero): frozen suff-stat tokenizer; federate the FULLY-SHARED prior
+                # (local_prefixes=()) at τ optimizer STEPS/round instead of epochs, with an
+                # adaptive server optimizer (FedAdam). τ=1 ≈ centralized SGD; the sweep over
+                # τ maps the knee where step-scale FedSGD still beats `local` on VUS-PR. The
+                # one regime where weight-averaging the prior is NOT monotone-harmful.
+                models = train_federated(cfg, entities, args.s1_rounds, args.s2_rounds,
+                                         args.local_epochs, device, seed=seed, local_prefixes=(),
+                                         tau_steps=args.tau_steps, server_opt=args.server_opt,
+                                         server_lr=args.server_lr)
+            elif arm == "federated_fedsgd_pooltok":
+                # Cell A of the tokenizer×prior 2×2: POOLED (centralized) tokenizer frozen,
+                # fully-shared prior federated at τ steps/round. Splits the wsd gap
+                # (centralized vs fedsgd) into a prior term and a tokenizer term. τ=1 ⇒
+                # prior ≈ centralized-SGD on an IDENTICAL pooled tokenizer. Tokenizer is
+                # cached (τ-independent) so the sweep trains it once per (seed, s1-epochs).
+                models = train_fedsgd_pooltok(cfg, entities, data_by_e, args.s1_epochs,
+                                              args.s2_rounds, args.local_epochs, device, seed=seed,
+                                              tau_steps=args.tau_steps, server_opt=args.server_opt,
+                                              server_lr=args.server_lr,
+                                              tok_cache_dir=(resolve_path("artifacts/fed_eval/_pooltok_cache")
+                                                             / args.dataset / (args.cluster or "all")))
+            elif arm == "federated_pooltok_centralprior":
+                # Cell C: SAME cached pooled tokenizer as pooltok, frozen, POOLED prior at the
+                # SAME update budget (--s2-rounds steps) and effective batch (K×--batch) as the
+                # τ=1 FedSGD prior. C − pooltok = pure prior-federation penalty (identical
+                # tokenizer AND budget). Removes the batch/budget confound vs `centralized`.
+                models = train_pooltok_centralprior(cfg, entities, data_by_e, args.s1_epochs,
+                                                    args.s2_rounds, device, seed=seed,
+                                                    batch=(args.batch or cfg.dataset.batch_size_stage2),
+                                                    tok_cache_dir=(resolve_path("artifacts/fed_eval/_pooltok_cache")
+                                                                   / args.dataset / (args.cluster or "all")))
+            elif arm == "federated_fedsgd_fedenc":
+                # DEPLOYABLE tokenizer federation #1: FedAvg the WHOLE encoder (fed_encoder="full")
+                # so the tokenizer is genuinely federated (no data pooling), paired with the same
+                # fully-shared τ FedSGD prior as pooltok. If it reaches ≈ pooltok/local it recovers
+                # the tokenizer gain WITHOUT pooling — the thesis-supporting method.
+                models = train_federated(cfg, entities, args.s1_rounds, args.s2_rounds,
+                                         args.local_epochs, device, seed=seed, local_prefixes=(),
+                                         tau_steps=args.tau_steps, server_opt=args.server_opt,
+                                         server_lr=args.server_lr, fed_encoder="full")
+            elif arm == "federated_fedsgd_align":
+                # DEPLOYABLE tokenizer federation #2: encoders stay LOCAL, aligned functionally on
+                # a shared public probe (permutation-free, fed_align="probe_mse"), paired with the
+                # same fully-shared τ FedSGD prior. The alignment alternative to weight-FedAvg.
+                models = train_federated(cfg, entities, args.s1_rounds, args.s2_rounds,
+                                         args.local_epochs, device, seed=seed, local_prefixes=(),
+                                         tau_steps=args.tau_steps, server_opt=args.server_opt,
+                                         server_lr=args.server_lr, fed_align="probe_mse",
+                                         align_weight=args.align_weight, align_cluster=args.cluster)
+            elif arm == "federated_align":
+                # B1: encoders stay LOCAL; align them functionally on a SHARED public probe
+                # (broadcast consensus encoding, per-round MSE pull) instead of averaging weights.
+                # Permutation-free tokenizer alignment; codebook = suffstat.
+                models = train_federated(cfg, entities, args.s1_rounds, args.s2_rounds,
+                                         args.local_epochs, device, seed=seed,
+                                         fed_align="probe_mse", align_weight=args.align_weight,
+                                         align_cluster=args.cluster)
+            else:
+                raise ValueError(f"unknown arm {arm!r}")
+
+            # Save checkpoints, FREE the GPU, then evaluate (memory-safe on shared GPUs).
+            # The directory carries the KNOBS, not just the arm: a μ or λ sweep runs the same
+            # arm name many times, and an un-tagged path silently overwrote every sweep point
+            # with the last one (checkpoints AND knobs.json).
+            sdir = scratch / f"seed{seed}" / _arm_tag(arm, fed_echo)
+            prov = Path(_RESUME_CTX["out"]) / "_fed_resume.pt" if _RESUME_CTX["out"] else None
+            if prov is not None and prov.exists():
+                sdir.mkdir(parents=True, exist_ok=True)
+                prov.replace(sdir / "_fed_resume.pt")     # same filesystem: atomic rename
+                prov.parent.rmdir() if not any(prov.parent.iterdir()) else None
+            # Checkpoint only what will be scored: `centralized` hands back the SAME
+            # model object for every client, so writing one copy per trained entity
+            # would be N identical files (248 of them on the pooled UCR arm).
+            ckpts = {e: save_client_ckpts(cfg, e, models[e][0], models[e][1], sdir)
+                     for e in eval_entities}
+            # B1 safety: measure the built model (params/conv widths), NOT cfg -- the only way to
+            # prove a --width-base / --prior-* knob actually threaded. See _structural_echo.
+            _first = entities[0]
+            echo = _structural_echo(cfg, models[_first][0], models[_first][1], fed=fed_echo,
+                                    models=models)
+            print(f"[echo] {arm} seed{seed} realized: {echo['realized']}")
+            sdir.mkdir(parents=True, exist_ok=True)
+            (sdir / "knobs.json").write_text(json.dumps(echo, indent=2), encoding="utf-8")
+            if fed_hist:
+                # perplexity/dead_frac/cb_drift are single-dictionary occupancy statistics under
+                # 'suffstat' and CROSS-dictionary spread statistics under 'local'. Same JSON keys,
+                # different meaning: record the mode so a table cannot silently mix them.
+                fed_hist["cb_mode"] = cb_regime
+                # Per-round federated telemetry. Without this file the round-level evidence
+                # (drift, prox_grad_ratio, proto_agg_gap, perplexity, dead_frac) exists only
+                # in the stdout log, which is not what the aggregation scripts read.
+                # `allow_nan=False` + a None-sanitiser: NaN is the normal value for a
+                # telemetry channel that does not apply to this arm, and bare `NaN` tokens
+                # are not valid JSON for a strict reader.
+                def _clean(o):
+                    if isinstance(o, float):
+                        return o if np.isfinite(o) else None
+                    if isinstance(o, dict):
+                        return {k: _clean(v) for k, v in o.items()}
+                    if isinstance(o, list):
+                        return [_clean(v) for v in o]
+                    return o
+                (sdir / "fed_history.json").write_text(
+                    json.dumps(_clean(fed_hist), indent=2, allow_nan=False), encoding="utf-8")
+            del models
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            print(f"===== EVAL arm={arm} seed={seed} =====")
+            for e in eval_entities:
+                rep = eval_from_ckpts(cfg, e, ckpts[e][0], ckpts[e][1], sdir)               # detection
+                rep.update(cf_fidelity_from_ckpts(cfg, e, ckpts[e][0], ckpts[e][1], device))  # CF vs x_clean
+                rep["_seed"], rep["_entity"] = seed, e
+                rep["_knobs"] = echo
+                pooled[arm].append(rep)
+                print(f"[{arm} s{seed}] {e}: vus_pr={rep.get('vus_pr', float('nan')):.3f} "
+                      f"cf={rep.get('cf_repair_improvement', float('nan')):.3f}")
+
+    summary = {arm: _aggregate(pooled[arm], METRIC_KEYS + THRESHOLDED_KEYS + CF_KEYS) for arm in arms}
+
+    # Raw per-(arm, seed, client) metric records — the substrate for a CORRECT
+    # two-level aggregation (per-seed macro-mean, THEN across-seed dispersion) and
+    # for paired significance tests. The in-process `summary`/_aggregate pools all
+    # (client, seed) reports into one flat list, so its std confounds client and
+    # seed variance and its "worst" is a single min-of-min point — fine as a quick
+    # console glance, WRONG for a camera-ready error bar. scripts/fed_aggregate.py
+    # consumes these records instead.
+    records = []
+    for arm in arms:
+        for rep in pooled[arm]:
+            rec = {"_arm": arm, "_seed": rep.get("_seed"), "_entity": rep.get("_entity")}
+            for k in METRIC_KEYS + THRESHOLDED_KEYS + CF_KEYS:
+                v = rep.get(k)
+                if isinstance(v, (int, float)) and np.isfinite(v):
+                    rec[k] = float(v)
+            records.append(rec)
+
+    # PERSIST BEFORE PRINTING. The tables below are pure presentation; the run's
+    # value is in `records`. Writing first means no formatting/encoding failure can
+    # destroy hours of training that already completed.
+    if args.out_json:
+        meta = {"dataset": args.dataset, "cluster": args.cluster,
+                "clients": entities, "seeds": seeds,
+                "s1_epochs": args.s1_epochs, "s2_epochs": args.s2_epochs,
+                "protocol": args.protocol,   # 'converged' => the epoch counts were IGNORED
+                                             # for local/centralized (val-driven stop instead)
+                "s1_rounds": args.s1_rounds, "s2_rounds": args.s2_rounds,
+                "local_epochs": args.local_epochs,
+                # effective, not requested: --batch unset means "whatever config says"
+                "batch_stage1": cfg.dataset.batch_size_stage1,
+                "batch_stage2": cfg.dataset.batch_size_stage2,
+                # Was `"bf16": bool`. Now records the dtype actually used, since `auto`
+                # resolves to fp16 below Ampere and bf16 from Ampere on.
+                "amp_dtype": (str(_amp_dtype()).replace("torch.", "")
+                              if _amp_dtype() is not None else "fp32"),
+                **_git_provenance()}
+        Path(args.out_json).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.out_json).write_text(json.dumps(
+            {"meta": meta, "summary": summary, "records": records}, indent=2), encoding="utf-8")
+        print(f"\n[out] wrote summary + {len(records)} raw records -> {args.out_json}")
+
+    # ── comparison tables ─────────────────────────────────────────────────────
+    def _print_table(title: str, keys: list[str], note: str) -> None:
+        print(f"\n================ {title} ================")
+        kk = [k for k in keys if any(k in summary[a] for a in arms)]
+        w = max(13, max(len(a) for a in arms) + 1)
+        print("arm".ljust(w) + "".join(f"{k:>22}" for k in kk))
+        for arm in arms:
+            row = arm.ljust(w)
+            for k in kk:
+                s = summary[arm].get(k)
+                row += (f"{s['mean']:.3f}±{s['std']:.3f}(min{s['worst']:.3f})".rjust(22)) if s else " " * 22
+            print(row)
+        print(note)
+
+    _print_table("RQ1: detection, THRESHOLD-FREE (macro over clients)", METRIC_KEYS,
+                 f"(higher = better; min = worst-client; VUS/PATE buffer = "
+                 f"{cfg.evaluation.paper_metrics_tolerance})")
+    _print_table("RQ1b: threshold-dependent (appendix)", THRESHOLDED_KEYS,
+                 f"(read off the q={cfg.threshold.q} quantile of TRAIN scores — "
+                 f"not the comparison surface)")
+    _print_table("RQ4: counterfactual fidelity vs x_clean", CF_KEYS,
+                 "(cf_repair_improvement ↑ better; cf_repair_ratio ↓, cf_disturb_mae ↓; cf_n_windows = #anomalous windows)"
+                 "\n(all-NaN on real datasets: no ground-truth clean signal exists)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

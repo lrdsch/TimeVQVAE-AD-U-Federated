@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WSD frozen · dataset viewer</title>
+<link rel="stylesheet" href="/static/vendor/uPlot.min.css">
+<style>
+  :root{
+    --bg:#0e1116; --panel:#151b23; --panel2:#1b222c; --bd:#28313d; --tx:#e6edf4;
+    --mut:#8b98a7; --acc:#5b9bd8; --green:#46a35a; --red:#e0605b; --amber:#e8b64c;
+    --mono:ui-monospace,"Cascadia Code","SF Mono",Menlo,Consolas,monospace;
+    --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--tx);font-family:var(--sans);overflow:hidden}
+  header{display:flex;align-items:center;gap:16px;padding:10px 18px;border-bottom:1px solid var(--bd);background:var(--panel)}
+  header h1{font-size:15px;margin:0;letter-spacing:-.01em;white-space:nowrap}
+  header h1 .v{color:var(--acc);font-family:var(--mono);font-size:12px;margin-left:6px}
+  .dssel{background:var(--panel2);color:var(--tx);border:1px solid var(--bd);border-radius:7px;
+    font-family:var(--mono);font-size:12px;padding:5px 8px;cursor:pointer;outline:none;max-width:340px}
+  .dssel:focus{border-color:var(--acc)}
+  .chips{display:flex;gap:8px;flex-wrap:wrap}
+  .chip{font-family:var(--mono);font-size:11px;color:var(--mut);background:var(--panel2);
+    border:1px solid var(--bd);border-radius:6px;padding:3px 8px;white-space:nowrap}
+  .chip b{color:var(--tx)}
+  #app{display:grid;grid-template-columns:290px 1fr;height:calc(100vh - 48px)}
+  /* sidebar */
+  aside{border-right:1px solid var(--bd);background:var(--panel);display:flex;flex-direction:column;min-height:0}
+  .search{padding:10px}
+  .search input{width:100%;background:var(--panel2);border:1px solid var(--bd);border-radius:7px;
+    color:var(--tx);padding:7px 10px;font-family:var(--mono);font-size:12px;outline:none}
+  .search input:focus{border-color:var(--acc)}
+  #tree{overflow:auto;flex:1;padding:0 6px 16px}
+  .folder{margin:2px 0}
+  .folder>.fhead{display:flex;align-items:center;gap:8px;padding:7px 8px;cursor:pointer;border-radius:7px;user-select:none}
+  .folder>.fhead:hover{background:var(--panel2)}
+  .dot{width:9px;height:9px;border-radius:50%;flex:none}
+  .fhead .nm{font-weight:600;font-size:13px}
+  .fhead .ct{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--mut)}
+  .fhead .tw{transition:transform .12s;color:var(--mut);font-size:10px}
+  .folder.collapsed .tw{transform:rotate(-90deg)}
+  .folder.collapsed .clients{display:none}
+  .clients{padding:2px 0 6px 22px;display:flex;flex-direction:column;gap:1px}
+  .client{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:6px;cursor:pointer;font-size:12.5px}
+  .client:hover{background:var(--panel2)}
+  .client.active{background:color-mix(in srgb,var(--acc) 22%,transparent);outline:1px solid var(--acc)}
+  .client .id{font-family:var(--mono)}
+  .client .badge{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--mut)}
+  .client .badge.hot{color:var(--red)}
+  /* main */
+  main{display:flex;flex-direction:column;min-width:0;min-height:0;padding:14px 16px;gap:12px;overflow:auto}
+  .toolbar{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  .title{font-size:16px;font-weight:600}
+  .title .sub{font-family:var(--mono);font-size:12px;color:var(--mut);margin-left:8px;font-weight:400}
+  .seg{display:inline-flex;border:1px solid var(--bd);border-radius:7px;overflow:hidden}
+  .seg button{background:var(--panel);color:var(--mut);border:0;padding:6px 12px;font-size:12px;cursor:pointer;font-family:var(--mono)}
+  .seg button.on{background:var(--acc);color:#04121f;font-weight:700}
+  .toggles{display:flex;gap:12px;align-items:center;margin-left:auto;flex-wrap:wrap}
+  label.tg{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--mut);cursor:pointer;user-select:none}
+  label.tg input{accent-color:var(--acc)}
+  .sw{width:14px;height:14px;border-radius:3px;border:1px solid var(--bd)}
+  .btn{background:var(--panel2);border:1px solid var(--bd);color:var(--tx);border-radius:7px;
+    padding:6px 12px;font-size:12px;cursor:pointer;font-family:var(--mono)}
+  .btn:hover{border-color:var(--acc)}
+  .hint{font-family:var(--mono);font-size:11px;color:var(--mut)}
+  #chartwrap{background:var(--panel);border:1px solid var(--bd);border-radius:12px;padding:10px 8px 4px;overflow-x:auto}
+  #chart{width:100%}
+  #info{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+  .card{background:var(--panel);border:1px solid var(--bd);border-radius:10px;padding:10px 12px}
+  .card .k{font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--mut)}
+  .card .val{font-family:var(--mono);font-size:15px;font-weight:600;margin-top:3px;word-break:break-all}
+  .prov{grid-column:1/-1;color:var(--mut);font-size:12.5px;line-height:1.5}
+  .prov code{font-family:var(--mono);background:var(--panel2);border:1px solid var(--bd);padding:1px 6px;border-radius:5px;color:var(--tx)}
+  .empty{color:var(--mut);padding:40px;text-align:center;font-size:14px}
+  /* uplot dark tweaks */
+  .uplot{font-family:var(--mono)}
+  .u-axis{color:var(--mut)}
+  .u-legend{font-family:var(--mono);font-size:12px;color:var(--tx)}
+  .btn.on{background:var(--acc);color:#04121f;border-color:var(--acc);font-weight:700}
+  /* legend box (sidebar bottom) */
+  .legend-box{border-top:1px solid var(--bd);padding:10px 12px 12px;font-size:11px;color:var(--mut);line-height:1.5;background:var(--panel)}
+  .legend-box .lgt{font-family:var(--mono);text-transform:uppercase;letter-spacing:.08em;font-size:10px;margin-bottom:6px}
+  .legend-box .lgrow{display:flex;align-items:center;gap:7px;margin:3px 0}
+  .legend-box .lgrow.txt{display:block}
+  .legend-box b{color:var(--tx);font-weight:600}
+  .legend-box code{font-family:var(--mono);background:var(--panel2);border:1px solid var(--bd);padding:0 4px;border-radius:4px;color:var(--tx)}
+  .lsw{width:15px;height:10px;border-radius:2px;flex:none;display:inline-block}
+  .lsw.dash{height:0;background:none;border-top:2px dashed #e8b64c}
+  /* tabs + overview */
+  .tabs{display:flex;gap:3px;margin-bottom:2px}
+  .tabs button{background:var(--panel);color:var(--mut);border:1px solid var(--bd);border-bottom:0;
+    border-radius:8px 8px 0 0;padding:8px 16px;font-size:13px;cursor:pointer;font-family:var(--mono)}
+  .tabs button.on{background:var(--panel2);color:var(--tx);font-weight:600}
+  #overviewView{border-top:1px solid var(--bd);padding-top:12px}
+  #ovSummary{display:flex;flex-wrap:wrap;gap:8px;margin:2px 0 12px;align-items:center}
+  #ovSummary .cdot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px;vertical-align:middle}
+  .ovfilter{display:inline-flex;border:1px solid var(--bd);border-radius:7px;overflow:hidden;margin-bottom:14px}
+  .ovfilter button{background:var(--panel);color:var(--mut);border:0;padding:6px 13px;font-size:12px;cursor:pointer;font-family:var(--mono)}
+  .ovfilter button.on{background:var(--acc);color:#04121f;font-weight:700}
+  #ovGrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(212px,1fr));gap:10px;padding-bottom:30px}
+  .tile{background:var(--panel);border:1px solid var(--bd);border-radius:9px;padding:8px 8px 6px}
+  .tile.frozen{cursor:pointer}
+  .tile.frozen:hover{border-color:var(--acc)}
+  .tile.excl{opacity:.52}
+  .tile canvas{width:100%;height:54px;display:block;border-radius:4px}
+  .tile .cap{display:flex;align-items:center;gap:6px;margin-top:5px;font-size:11px;font-family:var(--mono)}
+  .tile .cap .id{color:var(--tx);font-weight:600}
+  .tile .cap .rs{color:var(--mut)}
+  .tile .cdot{width:8px;height:8px;border-radius:50%;flex:none}
+  .tile .nantag{margin-left:auto;color:var(--amber);border:1px solid color-mix(in srgb,var(--amber) 40%,transparent);
+    border-radius:5px;padding:0 5px;font-size:10px;white-space:nowrap}
+</style>
+</head>
+<body>
+<header>
+  <h1><span id="h1title">dataset viewer</span><span class="v" id="ver"></span></h1>
+  <select id="dsSelect" class="dssel" title="switch dataset"></select>
+  <div class="chips" id="metaChips"></div>
+</header>
+<div id="app">
+  <aside>
+    <div class="search"><input id="search" placeholder="filter by KPI id…" autocomplete="off"></div>
+    <div id="tree"></div>
+    <div class="legend-box" id="legend">
+      <div class="lgt">legend</div>
+      <div class="lgrow"><span class="lsw" style="background:rgba(70,160,90,.42)"></span> train — no anomalies</div>
+      <div class="lgrow"><span class="lsw" style="background:rgba(232,182,76,.42)"></span> val — no anomalies (model selection)</div>
+      <div class="lgrow"><span class="lsw" style="background:rgba(120,140,175,.42)"></span> test — contains anomalies</div>
+      <div class="lgrow"><span class="lsw dash"></span> split @ 50% ((train+val)/test cut)</div>
+      <div class="lgrow"><span class="lsw" style="background:#d6605b"></span> anomaly label</div>
+      <div class="lgrow txt"><b>KPI badge</b> <code>0.11% · 27a</code> → anomalies in the <b>test</b> part:
+        <b>%</b> = share of test points that are anomalous, <b>27a</b> = 27 anomalous points (<b>a</b> = anomalies).</div>
+      <div class="lgrow txt"><b>NaN</b> <code>Nt/Ne</code> → missing points: <b>N</b> in train / <b>N</b> in test.</div>
+    </div>
+  </aside>
+  <main>
+    <div class="tabs" id="tabs">
+      <button data-tab="detail" class="on">detail</button>
+      <button data-tab="overview">overview · all 210 in context</button>
+    </div>
+    <div id="detailView">
+      <div class="toolbar" id="toolbar" style="display:none">
+        <div class="title" id="cliTitle"></div>
+        <div class="seg" id="viewmode">
+          <button data-v="full" class="on">full</button>
+          <button data-v="train">train</button>
+          <button data-v="test">test</button>
+        </div>
+        <button class="btn" id="reset">reset zoom</button>
+        <button class="btn" id="fulllen" title="print the whole series at full length; scroll horizontally">full length ⟷</button>
+        <div class="toggles">
+          <label class="tg"><span class="sw" style="background:rgba(70,160,90,.35)"></span><input type="checkbox" id="tgTrain" checked> train</label>
+          <label class="tg"><span class="sw" style="background:rgba(120,140,175,.35)"></span><input type="checkbox" id="tgTest" checked> test</label>
+          <label class="tg"><span class="sw" style="background:rgba(224,96,91,.6)"></span><input type="checkbox" id="tgAnom" checked> anomalies</label>
+        </div>
+        <div class="hint">drag = zoom · scroll = zoom · double-click = reset</div>
+      </div>
+      <div id="chartwrap" style="display:none"><div id="chart"></div></div>
+      <div id="info"></div>
+      <div class="empty" id="empty">← pick a cluster folder, then a KPI to view its train / test / anomalies</div>
+    </div>
+    <div id="overviewView" style="display:none">
+      <div id="ovSummary"></div>
+      <div class="ovfilter" id="ovFilter">
+        <button data-f="all" class="on" id="ovfAll">all</button>
+        <button data-f="frozen" id="ovfFrozen">frozen</button>
+        <button data-f="excluded" id="ovfExcluded">excluded</button>
+        <button data-f="nan">has NaN</button>
+      </div>
+      <div id="ovGrid"></div>
+    </div>
+  </main>
+</div>
+<script src="/static/vendor/uPlot.iife.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
