@@ -128,11 +128,32 @@ def main() -> int:
                     help="percentage of the original train held out as val (the tail)")
     ap.add_argument("--min-client-train", type=int, default=256,
                     help="drop a SERIES unless every one of its clients gets at least this "
-                         "many samples (2x the default window_length=128)")
+                         "many samples (2x the default window_length=128). "
+                         "IGNORED under --window-mode 2p, which derives it per series.")
     ap.add_argument("--min-val", type=int, default=128,
-                    help="drop a series unless the val tail is at least this long (1 window)")
+                    help="drop a series unless the val tail is at least this long (1 window). "
+                         "IGNORED under --window-mode 2p.")
     ap.add_argument("--min-test", type=int, default=256,
-                    help="drop a series unless the native test remainder is at least this long")
+                    help="drop a series unless the native test remainder is at least this long. "
+                         "IGNORED under --window-mode 2p.")
+    # ── window mode ──────────────────────────────────────────────────────────────────
+    # The eligibility thresholds above are all multiples of the ROLLING WINDOW: 2W / 1W / 2W
+    # at the config default W=128. TimeVQVAE-AD Algorithm 1 does not use a constant window --
+    # it uses T=2P from the series' own period -- so a build meant for that protocol has a
+    # DIFFERENT eligible set, series by series. Keeping the multipliers and moving W is what
+    # makes the two builds the same recipe rather than two arbitrary filters.
+    ap.add_argument("--window-mode", choices=["fixed", "2p"], default="fixed",
+                    help="'fixed': thresholds are the --min-* ints above (W=128 build). "
+                         "'2p': per-series W=2*period, thresholds = the window multipliers below.")
+    ap.add_argument("--periods-csv", type=Path,
+                    default=REPO / "preprocessing" / "UCR_anomaly_dataset_periods.csv",
+                    help="dataset_idx,period table used by --window-mode 2p")
+    ap.add_argument("--min-client-windows", type=float, default=2.0,
+                    help="[2p] min client slice, in windows (2.0 mirrors 256 = 2x128)")
+    ap.add_argument("--min-val-windows", type=float, default=1.0,
+                    help="[2p] min val tail, in windows (1.0 mirrors 128)")
+    ap.add_argument("--min-test-windows", type=float, default=2.0,
+                    help="[2p] min test remainder, in windows (2.0 mirrors 256)")
     ap.add_argument("--train-cap", type=int, default=None,
                     help="cap the ORIGINAL train segment before splitting (default: no cap — "
                          "the point of this build is to partition the real train)")
@@ -175,12 +196,46 @@ def main() -> int:
     if not files:
         raise SystemExit(f"No UCR .txt under {args.ucr_dir}. Download the archive first.")
 
+    # ── per-series window, under --window-mode 2p ────────────────────────────────────
+    periods: dict[str, int] = {}
+    if args.window_mode == "2p":
+        import csv as _csv
+        with open(args.periods_csv, encoding="utf-8-sig") as fh:
+            rows = list(_csv.DictReader(fh))
+        if not rows:
+            raise SystemExit(f"empty period table {args.periods_csv}")
+        idx_key = list(rows[0])[0]          # tolerate a BOM on the first header cell
+        for r in rows:
+            if r.get("period", "").strip():
+                periods[f"{int(r[idx_key]):03d}"] = int(r["period"])
+        if args.metrics_tolerance is None:
+            # Without this the VUS/PATE buffer and the top-k radius default to window//2,
+            # which under 2P ranges into the thousands: the window would move the MODEL and
+            # the YARDSTICK together and no A/B against the W=128 build could be attributed.
+            args.metrics_tolerance = 64
+            print("[ucr_split] *** --window-mode 2p and no --metrics-tolerance: PINNING 64 ***")
+            print("[ucr_split]     (window//2 would make the metric buffer follow the window,")
+            print("[ucr_split]      confounding the A/B against the W=128 build)")
+
+    def thresholds_for(idx: str) -> tuple[int, int, int, int | None]:
+        """(min_client_train, min_val, min_test, window) for this series."""
+        if args.window_mode == "fixed":
+            return args.min_client_train, args.min_val, args.min_test, None
+        P = periods.get(idx)
+        if P is None:
+            return 0, 0, 0, None                    # signalled as a skip by the caller
+        W = 2 * P
+        return (int(round(args.min_client_windows * W)),
+                int(round(args.min_val_windows * W)),
+                int(round(args.min_test_windows * W)), W)
+
     for sub in (*SPLITS, "test_label"):
         (out / sub).mkdir(parents=True, exist_ok=True)
 
     cluster_map: dict[str, list[str]] = {}
     meta_entities: list[dict] = []
     skipped: list[tuple[str, str]] = []
+    series_window: dict[str, int] = {}
     n_series = 0
 
     for p in files:
@@ -206,14 +261,19 @@ def main() -> int:
         client_lens = [b[i + 1] - b[i] for i in range(n_clients)]
         val_len = b[n_clients + 1] - b[n_clients]
 
-        if min(client_lens) < args.min_client_train:
-            skipped.append((p.name, f"smallest client slice {min(client_lens)} < {args.min_client_train}"))
+        min_ct, min_val, min_test, window = thresholds_for(idx)
+        if args.window_mode == "2p" and window is None:
+            skipped.append((p.name, f"no period for series {idx} in {args.periods_csv.name}"))
             continue
-        if val_len < args.min_val:
-            skipped.append((p.name, f"val {val_len} < {args.min_val}"))
+        wtag = f" (W={window})" if window else ""
+        if min(client_lens) < min_ct:
+            skipped.append((p.name, f"smallest client slice {min(client_lens)} < {min_ct}{wtag}"))
             continue
-        if test.shape[0] < args.min_test:
-            skipped.append((p.name, f"test {test.shape[0]} < {args.min_test}"))
+        if val_len < min_val:
+            skipped.append((p.name, f"val {val_len} < {min_val}{wtag}"))
+            continue
+        if test.shape[0] < min_test:
+            skipped.append((p.name, f"test {test.shape[0]} < {min_test}{wtag}"))
             continue
         if args.limit is not None and n_series >= args.limit:
             skipped.append((p.name, "beyond --limit"))
@@ -243,6 +303,11 @@ def main() -> int:
                 "n_anomaly_points": int(label.sum()),
                 "anomaly_rate": round(float(label.mean()), 6),
                 "orig_train_length": T,
+                # Present only under --window-mode 2p. The window is a PER-SERIES property
+                # there, so it has to travel with the data: a runner that re-derives it from
+                # its own copy of the period table can silently disagree with the eligibility
+                # filter that admitted the series.
+                **({"window": int(window), "period": int(window // 2)} if window else {}),
             })
 
         # The contract this whole build rests on: the shards + val are a PARTITION of
@@ -252,6 +317,8 @@ def main() -> int:
             raise SystemExit(f"{series_id}: shards+val do not reassemble the original train")
 
         cluster_map[series_id] = members
+        if window:
+            series_window[series_id] = int(window)
         n_series += 1
 
     if not cluster_map:
@@ -284,8 +351,44 @@ def main() -> int:
         "clusters": {k: len(v) for k, v in sorted(cluster_map.items())},
         "entities": meta_entities,
     }
+    # The window regime is part of this build's identity: two ucr_split* directories with the
+    # same protocol but different windows admit DIFFERENT series, so a run that reads the wrong
+    # one is not merely mis-tuned, it is on a different cohort.
+    metadata["window_mode"] = args.window_mode
+    if args.window_mode == "2p":
+        metadata["windows"] = {k: series_window[k] for k in sorted(series_window)}
+        metadata["window_rule"] = "W = 2 * period (TimeVQVAE-AD Algorithm 1); per series"
+        metadata["eligibility_windows"] = {
+            "min_client_train": args.min_client_windows,
+            "min_val": args.min_val_windows,
+            "min_test": args.min_test_windows,
+            "note": "thresholds are multiples of that series' own W, mirroring 2W/1W/2W at W=128",
+        }
+    else:
+        metadata["window_rule"] = "config default window_length=128 for every series"
     if args.metrics_tolerance is not None:
         metadata["metrics_tolerance"] = int(args.metrics_tolerance)
+
+    # Provenance of "why N series and not 250". Until 2026-07-29 the skip list was PRINTED
+    # and then lost: nothing on disk explained the 250 -> 226 drop, so anyone auditing the
+    # build had to re-derive it from the raw archive. The thresholds are recorded next to the
+    # list because they are what makes a series ineligible -- and `min_client_train` is tied
+    # to `2 * window_length = 256`, so a build for a different window has a different answer.
+    metadata["excluded_series"] = {
+        "n_input_files": len(files),
+        "n_built": n_series,
+        "n_skipped": len(skipped),
+        "thresholds": (
+            {"mode": "fixed", "min_client_train": args.min_client_train,
+             "min_val": args.min_val, "min_test": args.min_test,
+             "note": "min_client_train is 2 x the default window_length (128)"}
+            if args.window_mode == "fixed" else
+            {"mode": "2p", "min_client_windows": args.min_client_windows,
+             "min_val_windows": args.min_val_windows, "min_test_windows": args.min_test_windows,
+             "note": "per-series thresholds = multiplier x that series' own W = 2*period; "
+                     "each skip reason below carries the W it was judged against"}),
+        "series": [{"file": name, "reason": why} for name, why in skipped],
+    }
 
     (out / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     (out / "clusters.json").write_text(
@@ -298,13 +401,26 @@ def main() -> int:
     print(f"[ucr_split] wrote {out}")
     print(f"[ucr_split] {n_series} series x {n_clients} clients = {len(meta_entities)} entities, "
           f"{n_series} clusters")
-    print(f"[ucr_split] skipped {len(skipped)} series "
-          f"(min client slice {args.min_client_train}, min val {args.min_val})")
+    if args.window_mode == "fixed":
+        rule = f"min client slice {args.min_client_train}, min val {args.min_val}"
+    else:
+        rule = (f"per-series: min client {args.min_client_windows:g}W, "
+                f"min val {args.min_val_windows:g}W, min test {args.min_test_windows:g}W, W=2*period")
+    print(f"[ucr_split] skipped {len(skipped)} series ({rule})")
+    # Window-count line: under 2p every series has its own W, so a single "at W=..." number
+    # would be a fiction. Report the per-series minimum instead, which is the quantity the
+    # eligibility filter actually bounded.
     for i in range(n_clients):
         L = np.asarray(per_share[i])
-        print(f"[ucr_split]   p{i} ({shares[i]:>2d}%): train len min {L.min():>6d} "
-              f"median {int(np.median(L)):>6d} max {L.max():>6d}  "
-              f"(~{int(np.median(L)) - 128 + 1} stride-1 windows at W=128)")
+        head = (f"[ucr_split]   p{i} ({shares[i]:>2d}%): train len min {L.min():>6d} "
+                f"median {int(np.median(L)):>6d} max {L.max():>6d}")
+        if args.window_mode == "fixed":
+            print(f"{head}  (~{int(np.median(L)) - 128 + 1} stride-1 windows at W=128)")
+        else:
+            wins = [e["train_length"] - e["window"] + 1
+                    for e in meta_entities if e["partition"] == i]
+            print(f"{head}  (stride-1 windows at that series' own W: "
+                  f"min {min(wins)}, median {int(np.median(wins))})")
     print(f"[ucr_split] partitioned train samples: {tot_train:,}")
     print(f"[ucr_split] metadata.json has "
           f"{'metrics_tolerance=%d' % args.metrics_tolerance if args.metrics_tolerance is not None else 'NO metrics_tolerance -> window//2, same as ucr_ad'}")

@@ -1,3 +1,21 @@
+# ═══════════ RETRACTED / FROZEN — DO NOT RUN — the scripts/fa_*.py suite, 2026-07-27 ═══════════
+# CAUSE      mixture_eval._load_pool loads ONE stage-1 (client have[0]'s) and tokenizes EVERY
+#            client with it, while `federated_cb_only` federates only the CODEBOOK: encoders stay
+#            local and diverge (cross-client token agreement measured 0.0000). Each client's prior
+#            is scored on symbols it never saw. Deliberately NOT fixed here — repairing the
+#            contamination is the owner's research decision, not a cleanup.
+# RESULTS    NONE, ever: zero fa_* rows anywhere under artifacts/ (including the read-only
+#            history artifacts/_archive_20260729/) and zero logs under logs/. No number this
+#            file could print has ever been measured, so there is nothing here to cite.
+# RETRACTED  The claim carried by 13 of the 14 fa_* docstrings — that these numbers sit on "the
+#            same axis as the converged local / cb_only / centralized reports" — is FALSE
+#            (documentation/RESEARCH_LEDGER.md, Group 4): a deployed cb_only client tokenizes
+#            with its OWN encoder, so this layer measures an upper bound no deployment can
+#            reach. Marked [RETRACTED] inline below wherever it occurs.
+# REOPENING  needs an arm whose encoders are bit-identical across clients (`federated_enc_fedavg`);
+#            see documentation/LAUNCH_RUNBOOK.md §5.2b. Entry points are guarded: this suite's
+#            launcher scripts/launch_all_fa.sh refuses with exit 2 unless FA_I_KNOW_ITS_SHELVED=1.
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
 """
 E3 — HIGHER-ORDER FEDERATED COUNT PRIOR (federated analytics, exactly-mergeable).
 
@@ -34,6 +52,8 @@ token_scores has shape (B,C,F,W) [per_rate=False] or (1,B,C,F,W) [per_rate=True]
 thing downstream — rolling assembly, paper per-τ per-(C,F) threshold, VUS-PR /
 AUPRC / PATE — is the EXACT detect.py machinery, reusing mixture_eval._score_entity,
 so the numbers are on the same axis as the converged local / cb_only / centralized.
+  ^^^ [RETRACTED 2026-07-27 — FALSE. See the banner at the top of this file: cb_only shares only
+      the codebook, so the common tokenizer this sentence assumes does not exist.]
 
 Usage (smoke):
   CUDA_VISIBLE_DEVICES=1 python scripts/fa_ngram_ho.py \
@@ -242,7 +262,13 @@ def main() -> int:
 
     OUT_ROOT.mkdir(parents=True, exist_ok=True)
     rec_path = OUT_ROOT / f"records_{args.dataset}.jsonl"
-    rec_path.write_text("")            # fresh start for this dataset; records appended below (crash-resilient)
+    # Refuse to truncate the ledger to nothing (same guard as mixture_eval:295-303). The old
+    # `rec_path.write_text("")` up here gave the fresh start for this dataset BEFORE anything was
+    # scored, so a run that skipped every (cluster, seed) — or died early — left a 0-byte file
+    # where a good one had been, and a 0-byte ledger is indistinguishable from "never run" for
+    # every downstream reducer. Records are still appended one at a time (crash-resilient); the
+    # truncation is simply DEFERRED to the first record via the "w"-then-"a" flag below.
+    fresh = True
     n_records = 0
 
     for cluster in clusters:
@@ -292,8 +318,9 @@ def main() -> int:
                         v = rep.get(k)
                         if isinstance(v, (int, float)) and np.isfinite(v):
                             rec[k] = float(v)
-                    with rec_path.open("a") as fh:
+                    with rec_path.open("w" if fresh else "a") as fh:
                         fh.write(json.dumps(rec) + "\n")
+                    fresh = False              # first record truncated; the rest append
                     n_records += 1
                     print(f"  [{variant} {cluster} s{seed}] {e}: "
                           f"vus_pr={rep.get('vus_pr', float('nan')):.3f} "
@@ -304,6 +331,12 @@ def main() -> int:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
+    if n_records == 0:
+        raise SystemExit(
+            "[ngram_ho] produced 0 records — refusing to write an empty ledger.\n"
+            "  Every (cluster, seed) was skipped: the per-arm checkpoints are missing.\n"
+            "  Fix the inputs; do not let this overwrite an existing records file."
+        )
     print(f"[ngram_ho] wrote {n_records} records -> {rec_path}")
     return 0
 

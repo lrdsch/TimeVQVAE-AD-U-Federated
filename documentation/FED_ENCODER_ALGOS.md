@@ -170,16 +170,29 @@ vector for every sample of class k, not each sample's own residual. No scalar mu
 (`scripts/fed_enc_algo_unittest.py` asserts it: inflating within-class spread at fixed class
 means leaves the prototype term unchanged to 1e-6 while commitment grows ~60×).
 
-**Target.** FedProto's paper aggregation (Eq. 6) is count-weighted. Here that is
-`p̄_k = Σ_j m_j^k / Σ_j n_j^k` — **exactly the Prop.1 merged codebook** (measured relative
-error 2e-8). `--fedproto-agg count` is therefore *both* the paper-faithful aggregation *and*
-the degeneracy control: in this setting those are the same row. See "Fidelity to the original
-papers" below for the full statement — the canonical configuration (count aggregation + the
-reference implementation's per-sample form) is provably the commitment loss itself.
-The default `uniform` (mean over the clients that used code k, one vote each) differs from
-the codebook whenever clients contribute unequal counts — i.e. under exactly the
-heterogeneity this study is about — and it equalises client influence, which is the reason
-prototype methods aggregate per class rather than per sample.
+**Target.** Two readings of FedProto's server step exist and they do **not** agree. Which one
+is canonical is the single most consequential fact in this file, and until 2026-07-30 this
+document had it **backwards** — it called the default `uniform` a deviation and `count`
+paper-faithful. Corrected at the source:
+
+* **The authors' released code** — `yuetan031/FedProto`, `lib/utils.py`, `proto_aggregation`
+  (lines 151-170) and `agg_func` (lines 141-149) — averages **uniformly** over the clients
+  that hold the class: `agg_protos_label[label] = [proto / len(proto_list)]`. Neither function
+  contains `|D_{i,j}|` in any form. Re-read directly from the raw source on 2026-07-30.
+* **Eq. 6 as printed** carries the `|D_{i,j}|/N_j` factors, i.e. count-weighted.
+
+So `--fedproto-agg uniform` (the default) is **what the reference implementation computes**,
+and the per-class form is what the main text's Eq. 8 prints: the default is canonical on both
+axes at once, not a local convenience. `--fedproto-agg count` is the *literal* reading of
+Eq. 6 — and here it **degenerates**. `p̄_k = Σ_j m_j^k / Σ_j n_j^k` is the Prop.1 merged
+codebook: `scripts/fed_enc_algo_unittest.py` test 2 measures it **exact** against the pooled
+centroid and **4.6e-6** against the Laplace-smoothed codebook (the smoothing *is* the whole
+difference), and test 8 measures the resulting penalty against the commitment loss at
+**6.71e-08**. Under `count` the prototype pull targets a vector the commitment loss is already
+pulling toward, so the arm carries no cross-client information beyond `federated_cb_only` +
+common init — `federated.py` prints that warning at setup. (Do **not** quote the "2e-8" that
+used to stand here: the runbook retracted it on 2026-07-30 as not reproducible with these
+tests. The two numbers the tests actually produce are 4.6e-6 and 6.71e-8.)
 
 Because the two are so close in kind, every run logs `proto_agg_gap = ‖p̄_uniform −
 p̄_count‖/‖p̄_count‖`. **Pre-registered kill rule: below 5% the arm is reported as a
@@ -197,6 +210,41 @@ cross-client spread the prototype target is made of. So (i) judge the rule at th
 arm is actually reported at, (ii) a *falling* gap in an arm that federates well is evidence
 of alignment, and only a gap that starts low is evidence of degeneracy, and (iii) expect the
 hybrid ablation to look most like a commitment reweighting exactly where it works best.
+
+### FIRED 2026-07-30 — the `proto_agg_gap` kill rule triggers on the converged runs
+
+The rule above is pre-registered, so it gets applied whichever way it comes out. Measured on
+`artifacts/_archive_20260729/converge60/**/federated_enc_fedproto_lam0.1_count/fed_history.json`,
+all 10 clusters (toy M1–M6, wsd c0–c3), reading the gap **at the round each arm is reported
+at** — the best-on-val round, as clause (i) of the paragraph above requires:
+
+| cluster | best round | `proto_agg_gap` | | cluster | best round | `proto_agg_gap` |
+|---|---|---|---|---|---|---|
+| toy M1_rotary | 45 | 0.0209 | | toy M6_drive | 66 | 0.0425 |
+| toy M2_valve | 61 | 0.0178 | | wsd c0 | 45 | 0.0311 |
+| toy M3_pump | 69 | 0.0157 | | wsd c1 | 47 | 0.1664 |
+| toy M4_cardiac | 61 | 0.0970 | | wsd c2 | 50 | 0.0659 |
+| toy M5_bearing | 88 | 0.0073 | | wsd c3 | 32 | 0.0873 |
+
+**Median 3.7 %, and 6 of 10 clusters below the 5 % threshold.** By the letter of the rule the
+arm is to be reported as a reweighted commitment term, not as a distinct mechanism — which is
+also where the runbook already puts it (§5.2b: the publishable fact is the theorem, not the
+number). The smoke figures quoted above (12–46 %) do not survive at convergence, for the same
+reason the FedProx smoke did not: a 3-round run measures the transient.
+
+⚠️ **But clause (ii) of the same paragraph cuts the other way, and both halves have to be
+reported together.** A gap is evidence of *degeneracy* only if it **starts** low; a gap that
+*falls* is evidence of clients aligning. In these runs it starts at **0.6147–0.7772 on all ten
+clusters** (min toy M2_valve 0.6147, max toy M4_cardiac 0.7772) and decays monotonically in
+trend to the values above. So the honest statement is: *the target is distinct from the
+codebook early and becomes indistinguishable from it as the cohort converges* — the arm ends
+its life as a commitment reweighting, having not begun as one. Do not quote the 3.7 % without
+the 0.61–0.78, and do not quote the 0.61–0.78 as a clearance of the rule.
+
+⚠️ Second caveat, and it is the reason the rule cannot be discharged either way: **all ten of
+these runs are `--fedproto-agg count`**, the configuration in which the target is the merged
+codebook *by construction*. The gap is being read on the degenerate cell. `uniform` — the
+canonical reading — has never been run to convergence (LAUNCH_RUNBOOK §5.2, measurement debt).
 
 Two more deliberate choices:
 
@@ -247,8 +295,16 @@ not about federation.
 >   --batch 64 --seeds 0 --fedprox-mu 0.1 --fedproto-weight 0.1 --out-dir /tmp/smoke \
 >   --arms federated_enc_commoninit,federated_enc_fedavg,federated_enc_fedprox,federated_enc_fedproto
 > ```
-> Anything that is going to be cited belongs in `artifacts/encalgo_sweep/`, produced by
-> `scripts/run_enc_algo_sweep.sh`, with the seeds and the protocol below.
+> 🔴 **Corrected 2026-07-30.** This used to read "anything that is going to be cited belongs in
+> `artifacts/encalgo_sweep/`, produced by `scripts/run_enc_algo_sweep.sh`". That is no longer
+> true and contradicts the launch rule: `run_enc_algo_sweep.sh` lives **outside** the cohort
+> system, so its records carry no `cohort_fingerprint` and by the repo's one comparability rule
+> (LAUNCH_RUNBOOK §6) they are comparable to **nothing** — not even to each other across
+> re-runs. The directory does not exist any more either. **Anything that is going to be cited
+> comes from `bash scripts/launch.sh --cohort <name> …`** and lives in
+> `artifacts/runs/<tag>/`, with the cohort pinning dataset, cluster set, window, tolerance and
+> seeds. Keep `run_enc_algo_sweep.sh` for exploration if you like, but its output is not
+> evidence.
 
 **Pre-registered kill rule, stated so it can actually fail: the μ carried into the
 confirmatory run must show `prox_grad_ratio ≥ 1e-2` (loss form) or `prox_pull_frac ≥ 5%`
@@ -360,9 +416,22 @@ fedavg 0.0, fedprox 0.0, fedproto 0.057, commoninit 0.052.
 
 ## Fidelity to the original papers — what is canonical and what is not
 
-Audited against the primary sources (ar5iv full text; for FedProto also the authors' own
-implementation). Read this before writing any of it up: two of the three arms deviate, and one
-of the deviations is *forced by a degeneracy* that has to be reported as a result.
+Audited against the primary sources (ar5iv full text; for FedProto also the authors' released
+code). Read this before writing any of it up. Summary of where each arm stands: **FedAvg** and
+**FedProx** are canonical on their aggregation rule / objective and deviate on the solver and
+the scope (stateful Adam, encoder-only subspace); **FedProto** deviates on neither axis — what
+it has instead is a *degeneracy of this setting*, and that degeneracy is the reportable result.
+
+⚠️ **Provenance of this audit, corrected 2026-07-30 — the earlier version of this line said
+"for FedProto also the authors' own implementation" and that was an overclaim.** What had been
+read was `update.py::update_weights_het`, the **client-side loss** (cited in three files of
+this repo). The **server step** — `lib/utils.py::proto_aggregation`, the one function that
+decides the aggregation row of the table below — had never been opened:
+`grep -rn "proto_aggregation"` over this repo returned **zero** hits until 2026-07-30, and the
+single hit it returns today is the warning added that day at
+[`pipeline/federated.py:1469`](../pipeline/federated.py#L1469). The consequence was that the
+fidelity table was written **inverted** for both FedProto rows. It is fixed below; if you have
+cited the old table anywhere, that citation is wrong.
 
 ### FedAvg (McMahan et al., AISTATS 2017, arXiv:1602.05629)
 
@@ -399,54 +468,92 @@ the whole setup.**
 
 ### FedProto (Tan et al., AAAI 2022, arXiv:2105.00243) — the important one
 
-The paper and the authors' code disagree on the *form* of the regularizer, so both were read:
+**There are two primary sources and they disagree with each other**, so the honest audit reads
+each of our two axes against *both*. Read on 2026-07-30 (paper: ar5iv full text; code:
+`yuetan031/FedProto`, raw `main`):
 
 * **Eq. 3** local prototype `C_i^(j) = (1/|D_{i,j}|) Σ f_i(φ_i;x)` — a per-class mean. **We match.**
-* **Eq. 6** server aggregation `C̄^(j) = (1/|N_j|) Σ_{i∈N_j} (|D_{i,j}|/N_j) C_i^(j)` — **count-weighted**.
+* **Eq. 6** server aggregation `C̄^(j) = (1/|N_j|) Σ_{i∈N_j} (|D_{i,j}|/N_j) C_i^(j)` — **count-weighted as printed**.
 * **Eq. 8** `L_R = Σ_j d(C_i^(j), C̄_i^(j))` — reads as **per-class mean**.
-* **Appendix + the authors' code** (`yuetan031/FedProto`, `update_weights_het`):
+* **`lib/utils.py::proto_aggregation`** (lines 151-170) and **`agg_func`** (141-149) — the
+  server step the authors actually ship: `agg_protos_label[label] = [proto / len(proto_list)]`,
+  a **uniform mean over the clients holding the class**. No `|D_{i,j}|`, anywhere.
+* **Appendix + `update.py::update_weights_het`** — the client-side loss:
   `proto_new[i] = global_protos[label_i]; loss2 = MSELoss()(proto_new, protos)` —
   **per sample**, mean reduction.
 
-**Now the algebra that decides everything** (asserted in `scripts/fed_enc_algo_unittest.py`,
-test 8, measured relative error **6.7e-8**):
+So the two disagreements are on *different* axes and must not be collapsed into one:
+
+| axis | main text | released code | our default |
+|---|---|---|---|
+| **aggregation** (which target) | Eq. 6, count-weighted | `proto_aggregation`, **uniform** | **`uniform`** — matches the code |
+| **regularizer form** (how it pulls) | Eq. 8, per-class mean | `update_weights_het`, **per sample** | **per-class mean** — matches the text |
+
+**Read that table before believing there is a trap here: there is not.** On each axis the
+default agrees with one primary source, and no configuration can agree with both — because the
+sources themselves disagree. `--fedproto-agg uniform` **is FedProto's aggregation** by the
+authors' own implementation, and the per-class form **is FedProto's regularizer** by the
+authors' own Eq. 8. The arm as it ships is a legitimate reading of FedProto on both axes.
+
+**Now the algebra that decides which reading is available here** (asserted in
+`scripts/fed_enc_algo_unittest.py`, test 8, measured relative error **6.71e-8**):
 
 ```
 count-weighted prototype   p̄_k = Σ_j m_j^k / Σ_j n_j^k = e_k     (the Prop.1 merged codebook)
-canonical per-sample term  mean_i ‖z_i − p̄_{k(i)}‖²  =  mean_i ‖z_i − e_{k(i)}‖²
+per-sample term on it      mean_i ‖z_i − p̄_{k(i)}‖²  =  mean_i ‖z_i − e_{k(i)}‖²
 VQ commitment loss         mean_i ‖z_i − e_{k(i)}‖²              (vector_quantizer.py)
                            ^^^^^^^^^ the same expression ^^^^^^^^^
 ```
 
-**Canonical FedProto — per-sample regularizer + count-weighted aggregation — transplanted
-literally into this codebase IS the VQ commitment loss.** Adding it with weight λ is exactly
-equivalent to setting `commitment_weight ← commitment_weight + λ`. That is precisely the
-degeneracy `model/vector_quantizer.py` already documents for `anchor_weight`, and it is not an
-artefact of our coding: it follows from the class being the codebook index and the server's
-M-step being a count-weighted mean, which are both properties of *this setting*, not choices.
+**Take Eq. 6 literally *and* the code's per-sample form together, and the transplant into this
+codebase IS the VQ commitment loss.** Adding it with weight λ is exactly equivalent to setting
+`commitment_weight ← commitment_weight + λ` — the degeneracy `model/vector_quantizer.py`
+already documents for `anchor_weight`. It is not an artefact of our coding: it follows from the
+class being the codebook index and the server's M-step being a count-weighted mean, both
+properties of *this setting*. Note what that combination is, though: **count aggregation
+(from the text) + per-sample form (from the code) is a configuration that matches neither
+source as a whole.** It is a hybrid this repo assembled by taking one axis from each. Calling
+it "canonical FedProto", as this file did until 2026-07-30, was wrong.
 
-So the two deviations are **forced, not stylistic**:
+Corrected fidelity table:
 
-| item | our choice | paper | verdict |
-|---|---|---|---|
-| regularizer form | per-class batch **mean** (between-class only) | Eq. 8 says mean; the code says per-sample | **deviation from the reference implementation**, matches the main text's Eq. 8 |
-| aggregation | **uniform** over the clients using code k (default) | count-weighted (Eq. 6) | **deviation** — the paper-faithful setting is the degenerate one |
-| no weight averaging | none | none | **faithful** (Eq. 7 is prototype-only) |
-| heterogeneous client models allowed | identical models here | allowed, not required | **scope choice** |
-| classes = codebook indices | — | supervised labels | **adaptation**, and the source of the degeneracy |
+| item | our choice | main text | released code | verdict |
+|---|---|---|---|---|
+| aggregation | **`uniform`** over the clients using code k (default) | count-weighted (Eq. 6) | **uniform** (`proto_aggregation`) | ✅ **faithful to the implementation.** Not a deviation |
+| regularizer form | per-class batch **mean** (between-class only) | **per-class mean** (Eq. 8) | per sample (`update_weights_het`) | ✅ **faithful to the main text.** Deviation from the code only |
+| `--fedproto-agg count` | available, **not** the default | the literal Eq. 6 | — | 🔵 **degenerates here**: target ≡ the merged codebook (rel err ~3e-8 in-repo, 4.6e-6 vs the smoothed codebook) |
+| count + per-sample together | not implemented as an arm | — | — | 🔴 **a repo-built hybrid, canonical to neither source** — and provably the commitment loss (6.71e-8) |
+| no weight averaging | none | none | none | ✅ **faithful** (Eq. 7 is prototype-only) |
+| heterogeneous client models allowed | identical models here | allowed, not required | allowed | **scope choice** |
+| classes = codebook indices | — | supervised labels | supervised labels | **adaptation**, and the source of the degeneracy |
 
-*Honest one-liner:* **this is FedProto's mechanism (prototype-only communication, no weight
-averaging) with two deliberate departures — between-class form and uniform aggregation —
-because the canonical configuration provably reduces to the model's existing commitment loss.
-Report `--fedproto-agg count --fedproto-code-weight count` as the canonical null, not as an
-ablation.** Name the arm "codeword-prototype (FedProto-style)", not "FedProto".
+*Honest one-liner:* **the arm as it ships is FedProto — prototype-only communication, no
+weight averaging, uniform aggregation exactly as `proto_aggregation` computes it, per-class
+form exactly as Eq. 8 prints it — and the reason we do not also offer the text's literal Eq. 6
+is that in a VQ setting the count-weighted prototype IS the merged codebook, so that reading
+collapses onto the model's existing commitment loss.** The degeneracy is a property of the
+setting and is reportable as a finding. It is *not* a licence to call the arm non-canonical.
+"Codeword-prototype (FedProto-style)" remains the right name — because the *classes* are
+codebook indices rather than supervised labels, which is the one genuine adaptation.
 
 ### What to run because of this
 
-`--fedproto-agg count --fedproto-code-weight count` is now the **canonical-FedProto null row**:
-if the arm's headline is indistinguishable from it, the arm is a commitment-weight sweep. Pair
-it with `federated_cb_only` at `commitment_weight ∈ {1, 1+λ*}`, which is the same null reached
-from the other side.
+`--fedproto-agg count --fedproto-code-weight count` is the **degeneracy null row**, and it is
+worth stating precisely what it is a null *of*, because the previous wording ("the
+canonical-FedProto null") named it after a canon it does not belong to:
+
+> the count-weighted reading of Eq. 6 **as printed**, which in this VQ setting degenerates onto
+> the Prop. 1 merged codebook (rel err ~3e-8 measured in-repo) and therefore onto the
+> commitment loss.
+
+If the headline arm is indistinguishable from that row, the headline is a commitment-weight
+sweep. Pair it with `federated_cb_only` at `commitment_weight ∈ {1, 1+λ*}`, which is the same
+null reached from the other side. The **headline** is `--fedproto-agg uniform` (the default),
+which is the reference implementation's aggregation and the only non-degenerate reading here.
+
+🔴 **Measurement debt, and it is the wrong way round.** Every FedProto run this repo has ever
+taken to convergence is `count` — the degenerate cell. See LAUNCH_RUNBOOK §5.2 for the
+inventory and the exact launch command for the missing `uniform` run.
 
 ## Continuing a run instead of restarting it (`--resume-from`)
 
@@ -565,6 +672,13 @@ arms are *equivalent on detection*, and FedProto is the interesting row because 
 that equivalence **at zero marginal uplink, with no weight-space fusion, and with a
 personalized encoder per client**. That is a publishable claim about cost and mechanism —
 provided `proto_agg_gap` clears 5% and the equivalence is tested, not assumed.
+
+🔴 **As of 2026-07-30 that proviso is NOT met on anything measured.** The gap fired the kill
+rule (median 3.7 % at the reported round, 6/10 clusters under threshold — see "FIRED
+2026-07-30" above), so this paragraph describes a claim the data does not currently support.
+Two escapes exist and both need a run, not an argument: quote the gap's *trajectory*
+(0.61–0.78 → 0.02–0.17) rather than its endpoint, and measure `--fedproto-agg uniform`, which
+is the non-degenerate reading and has never been taken to convergence.
 
 ## Known gaps (deliberately not implemented)
 

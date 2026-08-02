@@ -72,6 +72,91 @@ CF_KEYS = ["cf_repair_improvement", "cf_repair_ratio", "cf_disturb_mae", "cf_n_w
 _CB_SERVER_EMA_DEFAULT_DECAY = 0.8
 
 
+# ─── the arm registry ────────────────────────────────────────────────────────
+# `PAPER_ARMS` is the reporting table: two references plus the (codebook primitive ×
+# prior sharing) factorial. Every cell of that factorial exists, which is what makes the
+# two contributions readable as main effects instead of as a list of ablations:
+#
+#                     | codebook: suff-stat        | codebook: weight-FedAvg
+#     prior LOCAL     | federated_cb_only(_ema)    | federated_fedavg_cb_only
+#     prior SHARED    | federated_shared           | federated_fedavg_cb_sharedprior
+#
+# `federated` (partially-personalized prior) is the method, sitting between the two prior
+# levels. The floor audit is why `_ema` is the (A) row and plain `cb_only` is the γ=0
+# ablation: against a zero-parameter moving average, cb_only_ema wins by +0.137 (p=3e-5)
+# while cb_only wins by +0.016 and is NOT distinguishable on the second extreme (p=0.209).
+# See documentation/FLOOR_BASELINE.md §0.3 before promoting cb_only to a headline row.
+PAPER_ARMS = [
+    "local",                              # floor
+    "centralized",                        # skyline
+    "federated_cb_only_ema",              # (A): suff-stat + server EMA  -- the row that clears the floor
+    "federated_cb_only",                  # (A) at gamma=0: the EMA ablation
+    "federated_fedavg_cb_only",           # -(A): the wrong primitive, everything else matched
+    "federated_shared",                   # -(B): prior fully shared
+    "federated_fedavg_cb_sharedprior",    # both surfaces done the obvious way
+    "federated",                          # the method: suff-stat + partially-personalized prior
+]
+
+# Everything else that dispatches. Kept working (sweeps, probes, the retired arms), but
+# NOT part of the reporting table -- see documentation/LAUNCH_RUNBOOK.md §5 for which are
+# retired and why. `federated_enc_fedavg` is the one to run and report in TEXT, not as a
+# row: against the floor it sits at p=0.992, i.e. indistinguishable from a moving average,
+# which is a stronger answer to "did you try FedAvg on the network?" than a table line.
+OTHER_ARMS = [
+    "centralized_cap",
+    "federated_anchor", "federated_align", "federated_protoprior",
+    "federated_cb_only_ema_norevive", "federated_fedavg_cb",
+    "federated_enc", "federated_enc_partial", "federated_enc_neck",
+    "federated_enc_fedavg", "federated_enc_fedprox", "federated_enc_fedproto",
+    "federated_enc_commoninit", "federated_enc_commoninit_cbshared",
+    "federated_enc_commoninit_cblocal",
+    "federated_enc_fedavg_cblocal", "federated_enc_fedprox_cblocal",
+    "federated_fedavgm", "federated_fedsgd", "federated_fedsgd_fedenc",
+    "federated_fedsgd_align", "federated_fedsgd_pooltok",
+    "federated_pooltok_centralprior",
+    "federated_fedavg_whole",             # DEPRECATED alias of federated_fedavg_cb_sharedprior
+]
+
+KNOWN_ARMS = frozenset(PAPER_ARMS) | frozenset(OTHER_ARMS)
+
+# ─── which arms actually READ which CLI knob ─────────────────────────────────────
+# The encoder-trio knobs are consumed by ONE branch of the dispatch chain (`federated_enc_*`);
+# the other 24 arms never look at them. argparse accepts them anyway, launch.sh copies them
+# into RUN.json's `extra_flags`, and the run's provenance then claims a treatment that was
+# never applied — `--arms federated_cb_only --extra "--fedprox-mu 0.1"` was accepted and
+# recorded verbatim. That is this repo's characteristic failure (wrong numbers, no error), so
+# main() turns "no requested arm reads this flag" into a hard exit. Keys are argparse dests.
+_ENC_TRIO_ARMS = ("federated_enc_fedavg", "federated_enc_fedprox", "federated_enc_fedproto",
+                  "federated_enc_commoninit", "federated_enc_commoninit_cbshared",
+                  "federated_enc_commoninit_cblocal", "federated_enc_fedavg_cblocal",
+                  "federated_enc_fedprox_cblocal")
+# μ/form reach the client only when algo == "fedprox" (`enc_prox_mu=… if algo == "fedprox"`).
+_FEDPROX_ARMS = ("federated_enc_fedprox", "federated_enc_fedprox_cblocal")
+# The prototype knobs need enc_proto_weight > 0 to do anything (federated.py: `enc_proto_on`,
+# and `enc_avg` only consults enc_proto_fedavg for fedproto). The commoninit* nulls pin λ=0,
+# so they are NOT owners: passing --fedproto-agg count there changes nothing.
+_FEDPROTO_ARMS = ("federated_enc_fedproto",)
+FLAG_OWNER_ARMS: dict[str, tuple[str, ...]] = {
+    "fedprox_mu": _FEDPROX_ARMS,
+    "fedprox_form": _FEDPROX_ARMS,
+    "fedproto_weight": _FEDPROTO_ARMS,
+    "fedproto_agg": _FEDPROTO_ARMS,
+    "fedproto_code_weight": _FEDPROTO_ARMS,
+    "fedproto_no_seed": _FEDPROTO_ARMS,
+    "fedproto_fedavg": _FEDPROTO_ARMS,
+    # scope/bn/prior are passed to train_federated by the trio branch ONLY: the probe arms
+    # (federated_enc, _partial, _neck, fedsgd_fedenc) hardcode their own fed_encoder and
+    # leave enc_bn at its default, so a --fed-enc-scope neck there is a no-op.
+    "fed_enc_scope": _ENC_TRIO_ARMS,
+    "fed_enc_bn": _ENC_TRIO_ARMS,
+    "fed_enc_prior": _ENC_TRIO_ARMS,
+    # …minus the four suffixed names, which PIN the codebook regime in the dispatch precisely
+    # so it is legible from the arm id; there the flag is overridden, not honoured.
+    "fed_enc_cb": ("federated_enc_fedavg", "federated_enc_fedprox",
+                   "federated_enc_fedproto", "federated_enc_commoninit"),
+}
+
+
 # ─── building blocks (local / centralized training) ──────────────────────────
 
 def _materialized_stage1(cfg: Config, example: torch.Tensor, device, collect_stats: bool) -> Stage1VQVAE:
@@ -521,6 +606,15 @@ def train_federated(cfg, entities, s1_rounds, s2_rounds, local_epochs, device, s
     out_history = out_history if out_history is not None else _RESUME_CTX.get("hist")
     patience_rounds = patience_rounds or int(_RESUME_CTX.get("patience") or 0)
     resume_out = resume_out if resume_out is not None else _RESUME_CTX["out"]
+    if out_history is not None:
+        # The codebook regime is recorded HERE, by the function that actually performs the
+        # merge, and not by the dispatcher: main() only knows `--fed-enc-cb`, which exactly two
+        # of the 32 arms read. Every other branch passes its own `cb_merge` ("fedavg" for the
+        # naive-average arms) or takes this signature's "suffstat" default, so the old
+        # `fed_hist["cb_mode"] = args.fed_enc_cb` could certify a merge that never happened —
+        # e.g. `--arms federated_cb_only --fed-enc-cb local` wrote cb_mode="local" over a
+        # suff-stat run. main() now only fills this key in if it is still missing.
+        out_history["cb_mode"] = cb_merge
     # `out_history` is the ONLY way the per-round federated telemetry (loss, val, perplexity,
     # dead_frac, codebook drift, and the encoder-federation channels) survives this call:
     # the caller gets models back, and everything the rounds measured used to be dropped on
@@ -567,7 +661,11 @@ def train_federated(cfg, entities, s1_rounds, s2_rounds, local_epochs, device, s
         s2_clients, h2, _ = federated_stage2(clients, cfg, rounds=s2_rounds, local_epochs=local_epochs, seed=seed,
                                              local_prefixes=local_prefixes, server_momentum=server_momentum,
                                              tau_steps=tau_steps, server_opt=server_opt, server_lr=server_lr,
-                                             select_on_val=converged)
+                                             select_on_val=converged,
+                                             # Same ceiling-not-budget contract as stage 1: the
+                                             # shared prior body has no other early stop, so
+                                             # without this whatever --s2-rounds is IS the budget.
+                                             patience_rounds=patience_rounds)
     if out_history is not None:
         out_history["stage2"] = h2
     return {c.entity_id: (c.s2.stage1, c.s2) for c in s2_clients}
@@ -1054,8 +1152,12 @@ def main() -> int:
     p.add_argument("--fedprox-form", type=str, default="loss", choices=["loss", "decoupled"],
                    help="'loss' = the FedProx paper's objective (the prox gradient goes through "
                         "AdamW's preconditioner, so small μ can be a NO-OP — watch prox_grad_ratio). "
-                        "'decoupled' = AdamW-style post-step contraction w += lr·μ·(w^t − w), where "
-                        "μ literally means 'fraction of drift removed per step'.")
+                        "'decoupled' = AdamW-style post-step contraction w += lr·μ·(w^t − w). NB the "
+                        "lr: the fraction of drift removed per step is lr·μ, NOT μ (an earlier "
+                        "version of this help said μ, wrong by 3 orders of magnitude at our lr). "
+                        "At lr=1e-3, μ=0.1 over 5 steps removes 5e-4 of the drift, not 41%; μ=O(10) "
+                        "is what gives the anchor authority over a round. `prox_pull_frac` in the "
+                        "round log is the measured 1−(1−lr·μ)^steps — read it, do not assume μ.")
     p.add_argument("--fedproto-weight", type=float, default=1.0,
                    help="FedProto λ: weight of the per-code prototype pull mean_k‖μ_k(batch) − p̄_k‖². "
                         "λ=0 leaves the encoder unfederated (no weight averaging either) — that is the "
@@ -1199,36 +1301,91 @@ def main() -> int:
     if not entities:
         raise SystemExit(f"no clients resolved for {cfg.dataset.name}")
     arms = [a.strip() for a in args.arms.split(",") if a.strip()]
-    # A HALF-converged table is worse than a fixed-budget one. `--protocol converged`
-    # only reaches the local/centralized baselines; the federated arms keep training on
-    # a fixed round budget (their inner loops interleave aggregation, so they cannot
-    # early-stop without a redesign). Mixing the two trains the BASELINES to convergence
-    # while capping the ARMS, which manufactures "federated < local" as an artifact of
-    # the budget rather than a property of federation -- and that is the headline claim.
-    if args.protocol == "converged":
-        # federated_cb_only IS converged-capable now (select_on_val stage1 + per-client
-        # converged prior), so it is a FAIR comparison and exempt from the warning. Any
-        # OTHER federated arm still trains its shared body on a fixed round budget.
+    # Validate the arm names BEFORE anything expensive. The dispatch chain raises
+    # `unknown arm` only after the config echo, the loaders and (for multi-arm runs) any
+    # earlier arm has already trained — so a typo in a 438-cluster sweep used to burn a
+    # data-loading pass per job before failing. Fail here instead, with the list.
+    _unknown = [a for a in arms if a not in KNOWN_ARMS]
+    if _unknown:
+        raise SystemExit(f"unknown arm(s) {_unknown}\nknown arms:\n  "
+                         + "\n  ".join(sorted(KNOWN_ARMS)))
+    # ── a knob that NO requested arm reads is an error, never a shrug ─────────────────
+    # See FLAG_OWNER_ARMS. An ignored flag is not harmless here: launch.sh records it in
+    # RUN.json's `extra_flags`, so the run's own provenance certifies a treatment that the
+    # dispatch chain never applied, and the resulting row is unfalsifiable after the fact.
+    # Hence SystemExit rather than a warning — a warning scrolls past in a 438-job sweep.
+    #
+    # "Explicitly set" = differs from the PARSER's default, read back with `p.get_default`.
+    # No sentinel defaults, on purpose: they would change what `args.<knob>` holds for every
+    # downstream read, and this file must not move a single number. The other candidate,
+    # re-parsing an empty argv, needs the parser to have no required options and re-runs the
+    # type= callbacks for nothing. The trade-off of the default-comparison is one FALSE
+    # NEGATIVE — passing a flag's own default value explicitly is not flagged — and that is
+    # the behaviour the runners need: every script here puts cohort-wide knobs such as
+    # `--fed-enc-prior local` (the default) in a COMMON string handed to EVERY arm, `local`
+    # and `centralized` included, and none of those runs is affected by it.
+    _ignored = [(dest, owners) for dest, owners in FLAG_OWNER_ARMS.items()
+                if getattr(args, dest) != p.get_default(dest)
+                and not any(a in owners for a in arms)]
+    if _ignored:
+        raise SystemExit(
+            "flag(s) set that NONE of the requested arms read — this run would have ignored "
+            "them in silence while RUN.json recorded them as applied:\n"
+            + "\n".join(f"  --{d.replace('_', '-')} {getattr(args, d)!r}  is honoured only by: "
+                        + ", ".join(o) for d, o in _ignored)
+            + f"\nrequested arms: {', '.join(arms)}\n"
+            "Drop the flag, or run it against an arm that honours it.")
+    # A HALF-converged table is worse than a fixed-budget one. Stage 1 honours
+    # `--protocol converged` for EVERY federated arm (select_on_val + patience); what can
+    # still differ is STAGE 2. An arm whose prior is fully local takes the per-client
+    # converged prior path. An arm with a SHARED prior body trains that body in rounds --
+    # and those rounds early-stop too, via `federated_stage2(patience_rounds=...)`, fed from
+    # `--fed-patience-rounds` through _RESUME_CTX (see train_federated below).
+    #
+    # ⚠ CORRETTO 2026-08-01. This block used to warn UNCONDITIONALLY that a shared prior
+    # body "trains on a FIXED round budget [and] cannot early-stop without a redesign", so
+    # any 'federated < local' read off the table was a budget artifact. The redesign exists
+    # and the text was never updated. Measured on ucr001_v1/ucr011_v1: all 12 shared-prior
+    # stage-2 histories end at `best + 6` -- the patience-6 signature -- against a cap of
+    # --s2-rounds 300, one of them stopping at r10. The logs print
+    # "[fed-s2] convergence stop ARMED: patience=6" for every one. The warning was calling
+    # valid results invalid, which is the expensive direction to be wrong in.
+    #
+    # So: warn only when stage-2 patience is genuinely OFF, which is the case the original
+    # text described.
+    if args.protocol == "converged" and not args.fed_patience_rounds:
+        # Converged END-TO-END: stage 1 by select_on_val + patience, stage 2 by the same
+        # per-client converged loop the baselines use (reached iff the prior is fully local).
         _CONVERGED_FED = {"federated_cb_only", "federated_cb_only_ema",
-                          "federated_cb_only_ema_norevive"}
+                          "federated_cb_only_ema_norevive",
+                          # The matched twin of cb_only: same fully-local prior, only the
+                          # codebook primitive differs, so it takes the same converged path.
+                          "federated_fedavg_cb_only"}
         # The encoder-federation trio inherits cb_only's converged treatment ONLY when its
         # prior is fully local (--fed-enc-prior local): that is the configuration in which
         # `train_federated` takes the per-client converged prior path. With a partial/shared
-        # prior the shared body is back on a fixed round budget and the warning is correct.
+        # prior the shared body trains in rounds -- which is fine WITH patience, and is why
+        # this whole block is now gated on --fed-patience-rounds being 0.
         if args.fed_enc_prior == "local":
             _CONVERGED_FED |= {"federated_enc_fedavg", "federated_enc_fedprox",
-                               "federated_enc_fedproto", "federated_enc_commoninit"}
+                               "federated_enc_fedproto", "federated_enc_commoninit",
+                               "federated_enc_commoninit_cbshared",
+                               "federated_enc_commoninit_cblocal",
+                               "federated_enc_fedavg_cblocal", "federated_enc_fedprox_cblocal"}
         _fed_arms = [a for a in arms if a.startswith("federated") and a not in _CONVERGED_FED]
         if _fed_arms:
             print("\n" + "!" * 78)
-            print("!! WARNING: --protocol converged applies ONLY to local/centralized.")
-            print(f"!! These arms still use a FIXED budget: {', '.join(_fed_arms)}")
-            print("!! Baselines trained to convergence vs arms capped at "
-                  f"--s2-rounds={args.s2_rounds} is NOT a fair comparison; any "
-                  "'federated < local'")
-            print("!! read off this table would be a budget artifact. Run the baselines "
-                  "and the")
-            print("!! federated arms in SEPARATE tables, or keep --protocol fixed.")
+            print("!! WARNING: these arms are converged at STAGE 1 but NOT at stage 2.")
+            print(f"!! Shared prior body, and --fed-patience-rounds is 0, so that body runs "
+                  f"the FULL --s2-rounds={args.s2_rounds}: {', '.join(_fed_arms)}")
+            print("!! Baselines trained to convergence vs a prior capped by the budget is "
+                  "NOT a fair")
+            print("!! comparison; any 'federated < local' read off this table would be a "
+                  "budget artifact.")
+            print("!! FIX: pass --fed-patience-rounds N (stage 2 early-stops too). Otherwise "
+                  "run the")
+            print("!! baselines and the federated arms in SEPARATE tables, or use "
+                  "--protocol fixed.")
             print("!" * 78 + "\n", flush=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     scratch = (resolve_path(args.out_dir) if args.out_dir
@@ -1266,15 +1423,35 @@ def main() -> int:
             # Written to a provisional directory because the authoritative `sdir` depends on
             # `_arm_tag(arm, fed_echo)`, and fed_echo is only known after the arm branch runs;
             # the file is moved next to its checkpoints as soon as sdir exists (below).
+            #
+            # That provisional directory MUST be private to this (arm, process). It used to be
+            # one shared `seed<N>/_resume_tmp` for everybody, and launch.sh dispatches one
+            # process per (dataset, cluster, arm) into the SAME --out-dir, two arms of a cluster
+            # starting ~3 s apart: whoever reached the `prov.replace(sdir/…)` below first walked
+            # off with the OTHER arm's bundle, and the load-time guards (federated.py) compare
+            # only `entities` and `merge`, which are identical across arms, so the swap passed in
+            # silence. It happened on disk: artifacts/_archive_20260729/ucrsplit/ckpt/ucr_200/
+            # seed0/local/_fed_resume.pt holds {"merge": "suffstat", "rounds_done": 300} while
+            # the `local` arm never calls train_federated at all. `_arm_tag(arm, None)` is the
+            # plain arm name (fed_echo, hence the μ/λ bits, exists only after the branch runs),
+            # so the PID separates two sweep points of the SAME arm too, and also stops a
+            # crashed run's stale bundle from being adopted by the next process — the orphan
+            # directory keeps the arm in its name, which is more forensics than `_resume_tmp`
+            # ever gave. `sdir` below stays the authoritative destination.
             _RESUME_CTX["from"] = args.resume_from
             _RESUME_CTX["patience"] = args.fed_patience_rounds
             _RESUME_CTX["rounds_done"] = args.resume_rounds_done
             _RESUME_CTX["hist"] = fed_hist
-            _RESUME_CTX["out"] = scratch / f"seed{seed}" / "_resume_tmp"
-            # Effective codebook regime for THIS arm. Defaults to the flag; the
-            # commoninit_cb{shared,local} arms pin it and overwrite this below. Defined here,
-            # before the dispatch chain, so the `fed_hist["cb_mode"]` record further down is
-            # correct for every arm instead of echoing a flag the arm may have overridden.
+            _RESUME_CTX["out"] = (scratch / f"seed{seed}"
+                                  / f"_resume_tmp_{_arm_tag(arm, None)}_{os.getpid()}")
+            # Codebook regime REQUESTED for the encoder trio: the flag, unless one of the
+            # commoninit_cb{shared,local} / *_cblocal arms pins it below. It is the dispatch
+            # value only — NOT a record of what ran. Every other arm hardcodes its own
+            # `cb_merge` in its train_federated call (or takes the "suffstat" default) and never
+            # reads this variable, so echoing it into fed_history.json used to publish
+            # cb_mode="local" for a `federated_cb_only` run that had merged by suff-stats. The
+            # truth is written by train_federated itself, which is the function that performs
+            # the merge; this stays only as the fallback for a caller that bypasses it.
             cb_regime = args.fed_enc_cb
             if arm == "local":
                 models = train_local(cfg, entities, data_by_e, args.s1_epochs, args.s2_epochs, device,
@@ -1291,20 +1468,47 @@ def main() -> int:
                                            device, pool_cap=args.pool_cap, protocol=args.protocol)
             elif arm == "federated":
                 models = train_federated(cfg, entities, args.s1_rounds, args.s2_rounds,
-                                         args.local_epochs, device, seed=seed)
+                                         args.local_epochs, device, seed=seed, protocol=args.protocol)
             elif arm == "federated_shared":
                 # (B)-ablation: FedAvg the WHOLE prior (no local head), with the SAME
                 # Prop.1 codebook federation as 'federated' held fixed. Measures ONLY
                 # the value of partial personalization. NOT a "naive FL" baseline — it
                 # keeps contribution (A), the sufficient-statistic codebook merge.
                 models = train_federated(cfg, entities, args.s1_rounds, args.s2_rounds,
-                                         args.local_epochs, device, seed=seed, local_prefixes=())
+                                         args.local_epochs, device, seed=seed, local_prefixes=(), protocol=args.protocol)
             elif arm == "federated_fedavg_cb":
                 # (A)-ablation: naive weight-FedAvg of the codebook (vs the Prop.1
                 # sufficient-statistic merge), with the partially-personalized prior
                 # held at the main-method setting. Isolates the value of the merge.
+                #
+                # ⚠ NOT the clean (A) contrast — the prior is federated here too, and prior
+                # weight-federation collapses on wsd (0.011-0.041, RESEARCH_LEDGER), so the
+                # merge effect is read through a much larger effect that has nothing to do
+                # with it. Use `federated_fedavg_cb_only` for the matched contrast.
                 models = train_federated(cfg, entities, args.s1_rounds, args.s2_rounds,
-                                         args.local_epochs, device, seed=seed, cb_merge="fedavg")
+                                         args.local_epochs, device, seed=seed, cb_merge="fedavg",
+                                         protocol=args.protocol)
+            elif arm == "federated_fedavg_cb_only":
+                # THE CLEAN (A) ABLATION — the matched twin of `federated_cb_only`.
+                #
+                # Everything is byte-identical to `federated_cb_only` (encoder local, decoder
+                # local, ENTIRE prior local via local_prefixes=("",), same rounds, same seeds,
+                # same converged protocol) EXCEPT the codebook aggregation primitive:
+                #
+                #   federated_cb_only        e_j = Σm_j / smoothed(Σn_j)   <- Prop. 1, exact
+                #                            pooled k-means M-step; codebook FROZEN locally.
+                #   federated_fedavg_cb_only e_j = Σ (n_k/n) · e_j^k       <- naive weight
+                #                            average; codebook moves locally via EMA.
+                #
+                # This cell did not exist: every route to a weight-averaged codebook also
+                # federated the prior, so contribution (A) had never been measured against a
+                # matched control. It is the cell that makes the (codebook primitive × prior
+                # sharing) factorial complete, and it is the row that answers "why not just
+                # average the codebooks?" on the axis the claim is made.
+                models = train_federated(cfg, entities, args.s1_rounds, args.s2_rounds,
+                                         args.local_epochs, device, seed=seed,
+                                         cb_merge="fedavg", local_prefixes=("",),
+                                         protocol=args.protocol)
             elif arm == "federated_anchor":
                 # ABLATION (c): the full recipe (A+B) PLUS the FedProto encoder
                 # anchor (lambda>0), which adds an extra pull of local encoders
@@ -1314,16 +1518,42 @@ def main() -> int:
                 # 'federated'). Codebook merge + partial personalization unchanged.
                 models = train_federated(cfg, entities, args.s1_rounds, args.s2_rounds,
                                          args.local_epochs, device, seed=seed,
-                                         anchor_weight=args.anchor_weight)
-            elif arm == "federated_fedavg_whole":
-                # NAIVE-FL STRAWMAN: drops BOTH contributions — weight-FedAvg the
-                # codebook (no (A) suff-stat merge) AND FedAvg the whole prior (no
-                # (B) partial personalization). The "federate everything the obvious
-                # way" baseline; the gap to 'federated' is the value of the full
-                # recipe (A+B) together.
+                                         anchor_weight=args.anchor_weight, protocol=args.protocol)
+            elif arm in ("federated_fedavg_cb_sharedprior", "federated_fedavg_whole"):
+                # Drops BOTH contributions: weight-FedAvg the codebook (no (A) suff-stat
+                # merge) AND FedAvg the whole prior (no (B) partial personalization). The
+                # gap to 'federated' is the value of the recipe (A+B) together.
+                #
+                # ⚠ RENAMED 2026-07-29. The old name was `federated_fedavg_whole` and the
+                # comment here claimed it was the "federate everything the obvious way"
+                # baseline. It is NOT, and the call below proves it: `fed_encoder` is left
+                # at its default "off", so the ENCODER and the DECODER are never federated —
+                # 100% of the stage-1 network stays local and only the dictionary and the
+                # prior cross the network. "whole" referred to the whole PRIOR, not the
+                # whole model, which is exactly the misreading the name invited.
+                #
+                # The real "federate everything" strawman does not exist in this repo:
+                # `_encoder_shared_keys` (pipeline/federated.py) filters on
+                # `k.startswith("encoder.")`, so no arm can select the decoder. If that row
+                # is wanted, the prefix tuple has to become a parameter first.
+                #
+                # The old name still dispatches so a sweep already in flight does not die,
+                # but it is reported loudly and must not appear in a table.
+                if arm == "federated_fedavg_whole":
+                    print("\n" + "!" * 78)
+                    print("!! DEPRECATED ARM NAME: 'federated_fedavg_whole' -> "
+                          "'federated_fedavg_cb_sharedprior'.")
+                    print("!! The old name reads as 'FedAvg the whole model'. It is not: the "
+                          "encoder and the")
+                    print("!! decoder are NEVER federated by this arm (fed_encoder stays "
+                          "'off'). Only the")
+                    print("!! codebook (naive weight-average) and the prior (fully shared) "
+                          "are.")
+                    print("!! Re-run under the new name before putting this row in a table.")
+                    print("!" * 78 + "\n", flush=True)
                 models = train_federated(cfg, entities, args.s1_rounds, args.s2_rounds,
                                          args.local_epochs, device, seed=seed,
-                                         cb_merge="fedavg", local_prefixes=())
+                                         cb_merge="fedavg", local_prefixes=(), protocol=args.protocol)
             elif arm == "federated_cb_only":
                 # ISOLATES contribution (A) ALONE: Prop.1 sufficient-statistic codebook
                 # federation with the ENTIRE prior kept LOCAL — local_prefixes=("",) makes
@@ -1364,7 +1594,7 @@ def main() -> int:
                 # whether representation misalignment is what makes FL lose to local (and whether
                 # Prop.1 resurrects once its comparable-assignment precondition holds).
                 models = train_federated(cfg, entities, args.s1_rounds, args.s2_rounds,
-                                         args.local_epochs, device, seed=seed, fed_encoder="full")
+                                         args.local_epochs, device, seed=seed, fed_encoder="full", protocol=args.protocol)
             elif arm == "federated_enc_partial":
                 # PROBE variant: share the LATE encoder blocks + ProjectBlock (codebook-facing
                 # map), keep the first `--enc-split-at` blocks (raw-signal front-end) LOCAL — align
@@ -1372,13 +1602,13 @@ def main() -> int:
                 # for the alignment-neck curve (Point 3).
                 models = train_federated(cfg, entities, args.s1_rounds, args.s2_rounds,
                                          args.local_epochs, device, seed=seed,
-                                         fed_encoder="partial", enc_split_at=args.enc_split_at)
+                                         fed_encoder="partial", enc_split_at=args.enc_split_at, protocol=args.protocol)
             elif arm == "federated_enc_neck":
                 # Point 3 (purest neck): share ONLY the codebook-facing projection (A_G),
                 # keep ALL encoder blocks local (H_k). Minimal shared alignment map.
                 models = train_federated(cfg, entities, args.s1_rounds, args.s2_rounds,
                                          args.local_epochs, device, seed=seed,
-                                         fed_encoder="neck")
+                                         fed_encoder="neck", protocol=args.protocol)
             elif arm in ("federated_enc_fedavg", "federated_enc_fedprox",
                          "federated_enc_fedproto", "federated_enc_commoninit",
                          "federated_enc_commoninit_cbshared",
@@ -1496,7 +1726,7 @@ def main() -> int:
                 # path; output_bias/channel_embedding stay LOCAL (fixes the calibration smear).
                 models = train_federated(cfg, entities, args.s1_rounds, args.s2_rounds,
                                          args.local_epochs, device, seed=seed,
-                                         server_momentum=args.server_momentum)
+                                         server_momentum=args.server_momentum, protocol=args.protocol)
             elif arm == "federated_protoprior":
                 # FedProto AT THE PRIOR LEVEL: frozen suff-stat tokenizer; per-client prior
                 # trained on OWN data + λ·KL toward the ensemble-consensus predictive
@@ -1505,7 +1735,7 @@ def main() -> int:
                 models = train_federated(cfg, entities, args.s1_rounds, args.s2_rounds,
                                          args.local_epochs, device, seed=seed,
                                          proto_weight=args.proto_weight,
-                                         proto_probe_windows=args.proto_probe_windows)
+                                         proto_probe_windows=args.proto_probe_windows, protocol=args.protocol)
             elif arm == "federated_fedsgd":
                 # #2 (R1-vero): frozen suff-stat tokenizer; federate the FULLY-SHARED prior
                 # (local_prefixes=()) at τ optimizer STEPS/round instead of epochs, with an
@@ -1515,7 +1745,7 @@ def main() -> int:
                 models = train_federated(cfg, entities, args.s1_rounds, args.s2_rounds,
                                          args.local_epochs, device, seed=seed, local_prefixes=(),
                                          tau_steps=args.tau_steps, server_opt=args.server_opt,
-                                         server_lr=args.server_lr)
+                                         server_lr=args.server_lr, protocol=args.protocol)
             elif arm == "federated_fedsgd_pooltok":
                 # Cell A of the tokenizer×prior 2×2: POOLED (centralized) tokenizer frozen,
                 # fully-shared prior federated at τ steps/round. Splits the wsd gap
@@ -1546,7 +1776,7 @@ def main() -> int:
                 models = train_federated(cfg, entities, args.s1_rounds, args.s2_rounds,
                                          args.local_epochs, device, seed=seed, local_prefixes=(),
                                          tau_steps=args.tau_steps, server_opt=args.server_opt,
-                                         server_lr=args.server_lr, fed_encoder="full")
+                                         server_lr=args.server_lr, fed_encoder="full", protocol=args.protocol)
             elif arm == "federated_fedsgd_align":
                 # DEPLOYABLE tokenizer federation #2: encoders stay LOCAL, aligned functionally on
                 # a shared public probe (permutation-free, fed_align="probe_mse"), paired with the
@@ -1555,7 +1785,7 @@ def main() -> int:
                                          args.local_epochs, device, seed=seed, local_prefixes=(),
                                          tau_steps=args.tau_steps, server_opt=args.server_opt,
                                          server_lr=args.server_lr, fed_align="probe_mse",
-                                         align_weight=args.align_weight, align_cluster=args.cluster)
+                                         align_weight=args.align_weight, align_cluster=args.cluster, protocol=args.protocol)
             elif arm == "federated_align":
                 # B1: encoders stay LOCAL; align them functionally on a SHARED public probe
                 # (broadcast consensus encoding, per-round MSE pull) instead of averaging weights.
@@ -1563,7 +1793,7 @@ def main() -> int:
                 models = train_federated(cfg, entities, args.s1_rounds, args.s2_rounds,
                                          args.local_epochs, device, seed=seed,
                                          fed_align="probe_mse", align_weight=args.align_weight,
-                                         align_cluster=args.cluster)
+                                         align_cluster=args.cluster, protocol=args.protocol)
             else:
                 raise ValueError(f"unknown arm {arm!r}")
 
@@ -1594,7 +1824,11 @@ def main() -> int:
                 # perplexity/dead_frac/cb_drift are single-dictionary occupancy statistics under
                 # 'suffstat' and CROSS-dictionary spread statistics under 'local'. Same JSON keys,
                 # different meaning: record the mode so a table cannot silently mix them.
-                fed_hist["cb_mode"] = cb_regime
+                # `setdefault`, because train_federated already wrote the regime it MERGED WITH;
+                # overwriting it with the CLI's intent is exactly the bug that made a suff-stat
+                # cb_only run declare cb_mode="local". This line now only covers a future arm
+                # that fills fed_hist without going through train_federated.
+                fed_hist.setdefault("cb_mode", cb_regime)
                 # Per-round federated telemetry. Without this file the round-level evidence
                 # (drift, prox_grad_ratio, proto_agg_gap, perplexity, dead_frac) exists only
                 # in the stdout log, which is not what the aggregation scripts read.

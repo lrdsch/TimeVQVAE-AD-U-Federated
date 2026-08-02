@@ -1,3 +1,21 @@
+# ═══════════ RETRACTED / FROZEN — DO NOT RUN — the scripts/fa_*.py suite, 2026-07-27 ═══════════
+# CAUSE      mixture_eval._load_pool loads ONE stage-1 (client have[0]'s) and tokenizes EVERY
+#            client with it, while `federated_cb_only` federates only the CODEBOOK: encoders stay
+#            local and diverge (cross-client token agreement measured 0.0000). Each client's prior
+#            is scored on symbols it never saw. Deliberately NOT fixed here — repairing the
+#            contamination is the owner's research decision, not a cleanup.
+# RESULTS    NONE, ever: zero fa_* rows anywhere under artifacts/ (including the read-only
+#            history artifacts/_archive_20260729/) and zero logs under logs/. No number this
+#            file could print has ever been measured, so there is nothing here to cite.
+# RETRACTED  The claim carried by 13 of the 14 fa_* docstrings — that these numbers sit on "the
+#            same axis as the converged local / cb_only / centralized reports" — is FALSE
+#            (documentation/RESEARCH_LEDGER.md, Group 4): a deployed cb_only client tokenizes
+#            with its OWN encoder, so this layer measures an upper bound no deployment can
+#            reach. Marked [RETRACTED] inline below wherever it occurs.
+# REOPENING  needs an arm whose encoders are bit-identical across clients (`federated_enc_fedavg`);
+#            see documentation/LAUNCH_RUNBOOK.md §5.2b. Entry points are guarded: this suite's
+#            launcher scripts/launch_all_fa.sh refuses with exit 2 unless FA_I_KNOW_ITS_SHELVED=1.
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
 """
 E5 — COLD-START / DATA SCARCITY (flagship Federated-Analytics win).
 
@@ -24,6 +42,8 @@ Three things per (entity, frac):
 Deployed anomaly score is PURE prior token-NLL, scored through detect.py's real
 rolling/threshold/VUS machinery (`_score_entity`), so every number is on the
 same axis as the converged local / cb_only / centralized reports.
+  ^^^ [RETRACTED 2026-07-27 — FALSE. See the banner at the top of this file: cb_only shares only
+      the codebook, so the common tokenizer this sentence assumes does not exist.]
 
 EXPECTED: FA_assisted >> local_scarce, and the gap WIDENS as `frac` shrinks —
 the flagship cold-start FA win.

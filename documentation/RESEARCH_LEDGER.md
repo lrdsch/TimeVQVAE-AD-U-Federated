@@ -180,6 +180,33 @@ Baselines (matched): **wsd local = 0.375** (n=113, full scope) / **wsd centraliz
 
 ---
 
+## 3b. FLOOR — the calibration baseline (2026-07-28, NEW-arch-matched)
+
+**What it is.** A zero-parameter detector — centred moving-average residual, $s_t=(x_t-\mathrm{MA}_{10}(x)_t)^2$
+— pushed through the *identical* `detect` path as every deep arm (same window geometry, same impulse term,
+same buffer, threshold from train only). Code: `scripts/floor_heads.py` (7 teste) + `scripts/floor_eval.py`
+(11 modi di federazione + witness di esattezza) + `scripts/floor_stats.py` (Wilcoxon/TOST matched).
+Design and pre-registration: `documentation/FLOOR_BASELINE.md`.
+
+| Claim | Evidence | Verdict |
+|---|---|---|
+| **Il floor su wsd_fed è una BANDA, non un numero**: testa pre-registrata `ma_c` **0.5054** median / 0.4421 mean — inviluppo (max su `ma_c`/`ma_causal`/`ar32`/`pca8`) **0.5585** / 0.4993 | `artifacts/floor/records_wsd_fed.jsonl` (7 teste × 31 client); `ma_c` riprodotta bit-identica, `pca8` e `random` identici al prototipo perduto | ✅ **CONVERGED-irrelevant** (non c'è training): cita **entrambi gli estremi** |
+| **Solo `cb_ema` e `local` superano ENTRAMBI gli estremi** (+0.139 p=1e-5 / +0.086 p=0.002; +0.114 p=6e-5 / +0.060 p=0.005) | Wilcoxon appaiato su (cluster, entity), `scripts/floor_stats.py` | ✅ |
+| ⚠️ **`centralized` NON supera l'inviluppo** (p=0.058, contro p=0.003 sulla testa singola); idem `cb_only` (p=0.209 vs 0.027) | idem | 🟠 la skyline non è distinguibile dal massimo di 4 detector da 0–1024 parametri |
+| Nessuna testa domina: per-client vince `ma_c` 13/31, `pca` 9, `ma_causal` 6, `ar` 3; e `pca`/`ma_causal`/`gauss` non sono distinguibili da `ma_c` (p=0.75/0.37/0.37) | batch D | ✅ — è il motivo per cui il floor va riportato come banda |
+| **`enc_fedproto` / `enc_commoninit` / `enc_fedprox` NON sono distinguibili da una media mobile a 10 campioni**; `enc_fedavg` sta sotto in mediana | stesso test, p = 0.087 / 0.224 / 0.456 / 0.992 | ✅ — **è il risultato negativo pubblicabile** |
+| L'**impulse term** di `detect` vale ~**+0.41 VUS-PR** su questo filtro (kpi_015: 0.3249 → 0.7342) | `scripts/floor_demo.py` | ✅ risultato secondario di prima classe |
+| Federazione via **statistiche sufficienti = pooled, esatta** (AR: `‖w_fed−w_pool‖/‖w_pool‖ = 9.7e-14` con percorso pooled *indipendente*; FedAvg 0.260) | `floor_demo.py` STEP 6, gate `--witness` in `floor_eval.py` | ✅ è lo **zero dell'asse perdita-di-aggregazione** |
+| **Il collasso weight-space si riproduce su un modello convesso, ed è la RIPARAMETRIZZAZIONE non la media**: stessa aggregazione, unica differenza il gauge → `fed_naive` 0.1154 vs `fed_fedavg` 0.4471 (p<1e-4, 4/4 cluster) | `artifacts/floor/records_wsd_fed.jsonl`, arm `floor_pca_K8_gamma0.05__fed_naive` | ✅ **controllo positivo, scatta** — separa "mediare i pesi è sbagliato" da "mediare pesi in basi non allineate è sbagliato" |
+| `ucr_split`: floor **0.0094** median vus_pr (unità = **cluster**, n=226) — e **`paper_top1` = 0.283**, cioè una media mobile localizza l'anomalia top-1 sul 28% delle serie UCR | `artifacts/floor/records_ucr_split.jsonl` (1130 righe, 21 metriche), `W=128` | ⚠️ agganciato a `W=128`: da rifare se gli arm deep passano a `2×periodo` |
+| 🔴 **Il verdetto sulla federazione DIPENDE DAL DATASET.** Su `wsd_fed` il trio `enc_*` non è distinguibile da una media mobile; su `ucr_split` **ogni** arm deep la batte con p<1e-5 (Δ +0.05…+0.22) | `scripts/floor_stats.py --dataset ucr_split`; ⚠️ n=45–49 cluster su 226 (sweep deep interrotto al 19,5% il 2026-07-29) | 🟠 **PARZIALE ma direzionalmente netto** — non generalizzare da un dataset solo |
+
+**Perché conta per la tesi.** La riga 1 di §4 ("federare perde contro local") resta vera ma cambia di
+significato: metà degli arm federati non è distinguibile da un detector senza parametri, quindi la domanda
+"federare aiuta?" su quegli arm è mal posta prima ancora di essere risposta.
+
+---
+
 ## 4. What is ESTABLISHED (cite these)
 
 > 🕗 **All eight claims below rest on OLD-arch/OLD-protocol runs.** They were "established" within a regime that no longer exists. Claim 2 in particular is **already known to have inverted** (new centralized 0.585 < new local 0.617). Treat this list as *hypotheses to re-establish*, not as citable results, until the retrain in `PROJECT_converged_federation.md` lands.

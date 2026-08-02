@@ -408,7 +408,30 @@ def apply_env_overrides(cfg: Config) -> Config:
       SCORE_MASK_CHUNK=<int>        — batched per-column mask scoring budget (default 1024;
                                       1 restores the one-forward-per-column path)
       DETECT_AMP=off|auto|fp16|bf16 — half precision in the detect forward (default off)
+      TVQ_SMOKE=1                   — SMOKE MODE: collapse every converged-loop budget so a
+                                      full arm sweep finishes in minutes. NOT REPORTABLE.
     """
+    if os.environ.get("TVQ_SMOKE") == "1":
+        # The `converged` protocol is exactly the path a smoke test most needs to exercise
+        # (select_on_val, patience, best-on-val restore) and exactly the one that makes a
+        # smoke run take hours: the per-client prior loop runs to 50k steps. Collapsing the
+        # budgets keeps the code path identical while making it finish.
+        #
+        # Announced loudly, and on EVERY run that sets it, because a smoke result that gets
+        # mistaken for a real one is the expensive failure here — the numbers look normal.
+        cfg.training.stage1_max_steps = 40
+        cfg.training.stage2_max_steps = 40
+        cfg.training.stage1_min_epochs = 1
+        cfg.training.stage2_min_epochs = 1
+        cfg.training.stage1_max_epochs = 2
+        cfg.training.stage2_max_epochs = 2
+        cfg.training.stage1_patience_steps = 20
+        cfg.training.stage2_patience_steps = 20
+        print("!" * 78)
+        print("!! TVQ_SMOKE=1 — converged budgets collapsed to 40 steps / patience 20.")
+        print("!! This run exercises the code path ONLY. Its metrics are MEANINGLESS and")
+        print("!! must never enter a table. Unset TVQ_SMOKE for anything reportable.")
+        print("!" * 78, flush=True)
     _amp = os.environ.get("AMP", "").lower()
     if _amp in {"0", "off", "false", "no"}:
         cfg.training.amp = False

@@ -176,8 +176,9 @@ def main() -> int:
               f"{prov} ================")
 
         # Two-level table. Width the arm column to the longest arm name actually
-        # present — `federated_fedavg_whole` (22 chars) overflowed the old ljust(18)
-        # and shifted its whole row out of alignment with the header.
+        # present — a fixed ljust(18) shifted long names out of alignment with the
+        # header (the offender was 22 chars; today's longest,
+        # `federated_fedavg_cb_sharedprior`, is 31, so the dynamic width is load-bearing).
         w = max(18, max(len(a) for a in arms_seen) + 2)
         header = "arm".ljust(w) + "".join(f"{m:>33}" for m in metrics)
         print(header)

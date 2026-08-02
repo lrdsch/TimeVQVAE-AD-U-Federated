@@ -1,6 +1,44 @@
 #!/usr/bin/env bash
 # Launch ALL Federated Analytics experiments, one screen each (wsd then toy),
 # staggered ~4s to avoid a CUDA-context allocation spike. GPU1 only.
+#
+#!FA! ─── SHELVED 2026-07-27 — DO NOT RUN WITHOUT READING THIS ────────────────────────────────
+#!FA! `scripts/mixture_eval.py:174` tokenizes EVERY client with client-0's encoder, but
+#!FA!   ^ that line number is STALE (it predates the 2026-07-30 retraction banner). The real
+#!FA!     site is the `load_stage1(s1_ckpts[have[0]], ...)` call inside `_load_pool` —
+#!FA!     `scripts/mixture_eval.py:234` as of 2026-07-30. Grep for `have[0]`, not for a line.
+#!FA! `federated_cb_only` federates ONLY the codebook — encoders stay local and diverge
+#!FA! (measured cross-client token agreement 0.0000, codeword-occupancy JS 0.686-0.693 against a
+#!FA! ln2=0.6931 ceiling, i.e. disjoint support). Any script that feeds a client's own prior with
+#!FA! another client's tokens is scoring a transformer on symbols it never saw.
+#!FA!   WITHDRAWN (unrecoverable without encoder federation): transfer, backoff, inputnorm,
+#!FA!              onboard's onboard_mixture arm
+#!FA!   CLEAN     (already pair per-client stage1 + prior): calibration, bnstats, mergevar
+#!FA!   FIAT-TOKENIZER (internally valid, externally mis-specified — cite only with the
+#!FA!              conditional caveat): robust, cbusage, ngram_ho, pca, rarity, dp (at --lam 0),
+#!FA!              onboard's onboard_count, coldstart's fa_assisted
+#!FA! Also: NO fa_* result was ever produced through the post-purge path, and the audit of
+#!FA! 2026-07-15 retracted all four legs of the FA value proposition (interoperability, DP,
+#!FA! Byzantine robustness, cold-start lead). `mixture_eval.py` already raises SystemExit at its
+#!FA! own choke point; this launcher is the OTHER entry point and had no guard until 2026-07-30.
+#!FA! Every scripts/fa_*.py now carries the same retraction banner at the top of the file, and
+#!FA! each one refuses to write a 0-byte ledger, so a shelved run cannot leave behind an artifact
+#!FA! that downstream reducers mistake for "not yet run".
+#!FA! Full reasoning: documentation/RESEARCH_LEDGER.md (Group 4) and
+#!FA! documentation/LAUNCH_RUNBOOK.md §5.2b.
+#!FA! Reopening requires `federated_enc_fedavg` (the only arm with bit-identical encoders).
+#!FA! Note on checkpoints: TVQ_CONVERGED_ROOT must point at artifacts/runs/<tag>/ckpt (a cohort
+#!FA! tag from scripts/launch.sh). artifacts/converge60/ckpt no longer exists (archived
+#!FA! 2026-07-29) and artifacts/_archive_20260729/ is read-only history, not a substitute.
+if [[ "${FA_I_KNOW_ITS_SHELVED:-}" != "1" ]]; then
+  grep '^#!FA!' "$0" | cut -c6- >&2
+  echo "" >&2
+  echo "REFUSING to launch 14 GPU-day-scale FA experiments whose suite is shelved." >&2
+  echo "The suite has NEVER produced a single record, and its results were retracted before" >&2
+  echo "they existed: running it now can only manufacture numbers that must not be cited." >&2
+  echo "If you have read the above and still want it: FA_I_KNOW_ITS_SHELVED=1 $0" >&2
+  exit 2
+fi
 REPO=/home/leonardo/PhD/TimeVQVAE-AD-U-Federated
 PY=/home/leonardo/PhD/TimeVQVAE-AD-M/.venv/bin/python3.10
 cd "$REPO" || exit 1

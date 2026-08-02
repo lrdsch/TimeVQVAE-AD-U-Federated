@@ -49,6 +49,13 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; cd "$REPO"
 PY="${PY:-/home/leonardo/PhD/TimeVQVAE-AD-M/.venv/bin/python3.10}"
 export PIPELINE_PYTHON="$PY"
 
+# MPS on the PRIVATE pipe dir. Without this the workers attach to the compiled-in default
+# /tmp/nvidia-mps, which is created 0777 with a 0666 control socket: any user on the box can
+# `quit_server` it, and on 2026-07-28 a server death there wedged 14 jobs on a socket poll
+# for 9.9 h with no error and no log. Env only -- this never starts or stops the daemon
+# (`bash scripts/mps_ctl.sh up` does that, and must be run first).
+MPS_CTL_ENV_ONLY=1 source "$REPO/scripts/mps_ctl.sh"
+
 # ── THE 2x2: window x codebook ───────────────────────────────────────────────────────
 # The paper differs from our config in TWO places, and they must be separable:
 #

@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import math
 import os
 from contextlib import nullcontext
@@ -319,6 +320,7 @@ def _local_train_stage1(client: ClientState, n_epochs: int, device: torch.device
     total, count = 0.0, 0
     obj_sum = 0.0
     prox_sum, proto_sum, steps = 0.0, 0.0, 0    # `steps` counts EVERY step (telemetry denominator)
+    proto_n = 0        # steps on which the prototype term EXISTED (see the NaN rule below)
     ratio_sum, ratio_n, skipped = 0.0, 0, 0
     # Resolve the proximal (param, ref) pairs ONCE: a per-step `dict(named_parameters())`
     # rebuild would dominate the term's own cost on a 52-tensor encoder.
@@ -364,6 +366,7 @@ def _local_train_stage1(client: ClientState, n_epochs: int, device: torch.device
                     if proto is not None:
                         loss = loss + client.proto_weight * proto
                         proto_sum += float(proto.detach())
+                        proto_n += 1
             finally:
                 # Never leave a graph pinned on the VQ if the block above raised.
                 for vq in client.vqs:
@@ -408,7 +411,15 @@ def _local_train_stage1(client: ClientState, n_epochs: int, device: torch.device
             if math.isfinite(lv):              # an overflowed step must not poison the mean
                 total += lv; obj_sum += obj; count += 1
     client.last_prox = prox_sum / steps if (steps and client.prox_mu > 0) else float("nan")
-    client.last_proto = proto_sum / steps if (steps and client.proto_weight > 0) else float("nan")
+    # NaN when the term did not EXIST this round — never 0.0. Under `--fedproto-no-seed`
+    # there is no prototype at round 0 (`_proto_term` returns None on every step), and a
+    # reported `proto_term = 0.0` would read as "the anchor was applied and the encoder
+    # already sat exactly on the global prototypes" — the opposite of "the arm was
+    # unfederated for this round". Every other non-applicable telemetry field in this file
+    # is NaN; this one now is too. The DENOMINATOR is still `steps` (not `proto_n`) so any
+    # round that did apply the term reports the value it always reported.
+    client.last_proto = (proto_sum / steps
+                         if (steps and proto_n and client.proto_weight > 0) else float("nan"))
     client.last_obj = obj_sum / count if count else float("nan")
     client.last_steps, client.last_skipped = steps, skipped
     # ── "is the proximal term doing anything?" — ONE diagnostic PER FORM ──────────
@@ -513,7 +524,18 @@ def _server_merge(counts, sums, eps, threshold, revive: bool, *,
     with EMA history is not killed for one idle round (the intended memory), while the
     fixed integer `threshold` is not tripped by the cold-start damping of the raw C.
     The codebook and the broadcast still use the raw (C, S) — the correction cancels in
-    S/smoothed(C) and only matters for the magnitude-sensitive threshold."""
+    S/smoothed(C) and only matters for the magnitude-sensitive threshold.
+
+    EXACTNESS, DELIMITED. "The merge is an exact function of the aggregated sufficient
+    statistics" (Prop. 1) is a claim about `weight = M/smoothed(N)` — and it holds ONLY for
+    `revive=False`, or for `revive=True` with no dead code. The revival branch below
+    overwrites `weight[dead]` with `weight[pick] + 0.01·randn`, so with even one dead code
+    the returned codebook depends additionally on (i) the global RNG stream at call time and
+    (ii) the `dead` mask, i.e. on the fixed integer `threshold`, not on (N, M) alone. Two
+    servers given identical (N, M) then disagree. This is a deliberate, data-free repair of
+    an unused dictionary entry — nothing client-side leaks into it — but it must not be
+    described as part of the additive/exact aggregation when the property is being claimed
+    (paper text, `scripts/fed_regression_unittest.py`): test exactness with revive off."""
     weight, N, M = SharedVectorQuantizer.merge_round_stats(counts, sums, eps=eps)
     dead_count = N                          # what the fixed dead-code threshold is compared to
     if ema_decay is not None:
@@ -756,20 +778,35 @@ def _save_resume_bundle(clients, out_dir, rounds_done: int, server_ema, merge: s
       * the server-side codebook EMA accumulators, for the `federated_cb_only_ema` regime.
         (They are also recoverable from any client's broadcast EMA buffers, but only up to
         the bias-correction weight `w`, which lives on the server alone.)
+      * the LR scheduler's step counter (`enc_sched='cosine'`). `rounds_done` alone does NOT
+        restore it: `_attach_cosine_schedules` builds a fresh LambdaLR whose `last_epoch` is
+        -1→0, so a continuation would replay the warmup from t=0 and jump the LR back to its
+        peak — while this docstring promised the opposite. The lambda closure is not saved
+        (LambdaLR.state_dict drops it by design) and does not need to be: the schedule is
+        rebuilt from `rounds`/`local_epochs` before the load, and only `last_epoch` /
+        `_step_count` come from here. `None` per client when no schedule is attached, which
+        is every arm on disk — so this key changes nothing for them.
+
+    format 2 adds `sched`. Both directions stay compatible because the reader takes every
+    key through `.get()`: a format-1 bundle loads (and warns if a schedule is active), and
+    an older reader ignores the new key.
     """
     out_dir = Path(out_dir); out_dir.mkdir(parents=True, exist_ok=True)
     torch.save({
-        "format": 1,
+        "format": 2,
         "rounds_done": int(rounds_done),
         "merge": merge,
         "entities": [c.entity_id for c in clients],
         "opt": [{k: v for k, v in c.opt.state_dict().items()} for c in clients],
         "scaler": [c.scaler.state_dict() for c in clients],
+        "sched": [(c.sched.state_dict() if c.sched is not None else None) for c in clients],
         "server_ema": ([{k: (v.cpu() if torch.is_tensor(v) else v) for k, v in st.items()}
                         for st in server_ema] if server_ema is not None else None),
     }, _resume_bundle_path(out_dir))
+    n_sched = sum(c.sched is not None for c in clients)
     print(f"[fed] resume bundle written -> {_resume_bundle_path(out_dir)} "
           f"(rounds_done={rounds_done}; per-client optimizer + scaler"
+          f"{f' + {n_sched} LR schedule(s)' if n_sched else ''}"
           f"{' + server codebook EMA' if server_ema is not None else ''})")
 
 
@@ -780,10 +817,15 @@ def _load_resume(clients, devices, resume_dir, cfg, merge: str, server_ema) -> i
     continuing:
 
       FULL  `_fed_resume.pt` present -> model + optimizer + scaler + round counter (+ server
-            EMA) are all restored; continuing is equivalent to having run longer.
+            EMA, + LR schedule from format 2 on) are all restored; continuing is equivalent
+            to having run longer.
       WEIGHTS-ONLY  only the per-entity `stage1.ckpt`s -> the model and the entire VQ state
             are restored, but the optimizer restarts. That is a genuine perturbation, not a
             formality, so it is reported loudly rather than mentioned in a docstring.
+
+    A format-1 bundle carries no schedule state. That is silent only for `enc_sched='none'`
+    (every arm on disk); with a schedule attached the continuation WOULD replay the warmup,
+    so it is reported as loudly as the weights-only tier instead.
     """
     resume_dir = Path(resume_dir)
     missing = [c.entity_id for c in clients
@@ -801,13 +843,16 @@ def _load_resume(clients, devices, resume_dir, cfg, merge: str, server_ema) -> i
             v.reset_round_stats()          # a fresh round starts with empty accumulators
 
     bundle_path = _resume_bundle_path(resume_dir)
+    n_sched = sum(c.sched is not None for c in clients)
     if not bundle_path.exists():
         print(f"[fed] RESUME (weights only) <- {resume_dir}\n"
               f"      !! No _fed_resume.pt: the AdamW moment estimates and the GradScaler "
               f"state of the original run are NOT on disk, so each client restarts its "
               f"optimizer. Expect a transient of ~10 steps/client, and do NOT present the "
               f"result as 'the same run trained longer' — it is a warm-started continuation. "
-              f"Runs from this version onward write the bundle, so their resumes are exact.")
+              f"Runs from this version onward write the bundle, so their resumes are exact."
+              + (f"\n      !! The LR schedule also restarts at t=0 (warmup replayed, LR back "
+                 f"to its peak) for all {n_sched} client(s)." if n_sched else ""))
         return 0
 
     b = torch.load(bundle_path, map_location="cpu", weights_only=False)
@@ -823,13 +868,58 @@ def _load_resume(clients, devices, resume_dir, cfg, merge: str, server_ema) -> i
     for c, ost, sst in zip(clients, b["opt"], b["scaler"]):
         c.opt.load_state_dict(ost)
         c.scaler.load_state_dict(sst)
-    if b.get("server_ema") is not None and server_ema is not None:
-        for dst, src in zip(server_ema, b["server_ema"]):
-            dst.update(src)
+    # LR schedules (format 2+). The lambda is rebuilt by `_attach_cosine_schedules` before
+    # this call — only the counter comes from the bundle. `.get()` because format-1 bundles
+    # predate the key; a run with no schedule attached restores nothing either way, which is
+    # why this is a no-op for every arm on disk.
+    sched_states = b.get("sched")
+    n_sched_restored = 0
+    if n_sched and sched_states is not None:
+        for c, sd in zip(clients, sched_states):
+            if c.sched is None or sd is None:
+                continue
+            c.sched.load_state_dict(sd)
+            # `load_state_dict` restores `last_epoch`/`_last_lr` but does NOT push the LR
+            # back into the optimizer, and the first local step reads `param_groups[0]['lr']`
+            # before any `sched.step()`. (The optimizer state_dict above already carries the
+            # same value; writing it from the schedule keeps the two in agreement even for a
+            # bundle whose optimizer groups were edited.)
+            for g, lr in zip(c.opt.param_groups, c.sched.get_last_lr()):
+                g["lr"] = lr
+            n_sched_restored += 1
+    elif n_sched:
+        print(f"[fed] !! RESUME: {n_sched} client(s) have an LR schedule but the bundle is "
+              f"format {b.get('format')} (no 'sched' key): the schedule RESTARTS at t=0, so "
+              f"the warmup is replayed and the LR jumps back to its peak. The continuation "
+              f"is not 'the same run trained longer' — re-run from scratch, or report the "
+              f"restart. Bundles written from format 2 on carry the schedule.")
     done = int(b.get("rounds_done", 0))
     print(f"[fed] RESUME (full) <- {resume_dir}: {done} rounds already done; optimizer + "
-          f"scaler{' + server codebook EMA' if b.get('server_ema') else ''} restored.")
+          f"scaler{f' + {n_sched_restored} LR schedule(s)' if n_sched_restored else ''}"
+          f"{' + server codebook EMA' if b.get('server_ema') else ''} restored.")
     return done
+
+
+def _round_seed(seed: int, rnd: int, ci: int, stage: int = 1) -> int:
+    """Per-(seed, round, client) RNG seed, with NO cross-seed aliasing.
+
+    The old schedule was `seed*1000 + rnd*100 + ci` (stage 2: `seed*7000 + …`). Under it
+    (seed 7, round 10, client 0) and (seed 8, round 0, client 0) resolve to the SAME value,
+    so `--seeds 0,1,2` over a 90-round budget gave three replicates that shared their entire
+    batch-ordering stream, merely shifted by 10 rounds. Each run stayed valid; what was wrong
+    is that the seed-to-seed variance — the thing multi-seed exists to estimate — was
+    understated, and a paired test across seeds was not testing what it claimed.
+
+    A LINEAR schedule cannot fix this by picking better strides: `a*seed + b*rnd + ci`
+    aliases whenever `a` is reachable as `b*Δrnd + Δci`, and making `a` large enough to
+    outrun the round range overflows the seed type. (Measured while writing this: primes
+    1_000_003/100_003 still collide at Δseed=1, Δrnd=10, Δci=-27.) So the mixing is a hash,
+    which has no structured aliasing at all: blake2b over the tuple, taken to 63 bits.
+    Deterministic and portable — same (stage, seed, round, client) gives the same value on
+    any machine and any run, which is what reproducibility needs.
+    """
+    key = f"{stage}:{seed}:{rnd}:{ci}".encode()
+    return int.from_bytes(hashlib.blake2b(key, digest_size=8).digest(), "big") >> 1
 
 
 def _client_weights(clients) -> list[float]:
@@ -978,10 +1068,21 @@ def _prox_term(pairs: list) -> torch.Tensor:
                    even μ=10 removes only 1% of the drift per step. The knob that means
                    "fraction removed per step" is lr·μ, NOT μ (see `last_prox_pull`).
 
-    Either way μ here is NOT numerically comparable to a μ from an SGD FedProx table."""
+    Either way μ here is NOT numerically comparable to a μ from an SGD FedProx table.
+
+    THE EMPTY-PAIRS GUARD IS DEFENCE IN DEPTH, NOT THE CONTRACT. It cannot fire from this
+    repo: `_local_train_stage1` builds `prox_pairs` once and calls this only under
+    `if prox_pairs`, so an empty set silently means "no proximal term" there, not an error.
+    The condition worth failing on — μ>0 while the shared set contains no PARAMETER, i.e. a
+    FedProx arm that is really FedAvg — is therefore checked where it is decidable and where
+    a run can still be stopped: `federated_stage1`'s setup, on `enc_param_names`. Keep this
+    raise as the last line of defence for a future caller that does not pre-filter."""
     if not pairs:
         raise ValueError("_prox_term called with no (param, ref) pairs — the caller must "
-                         "not enable FedProx when the shared parameter set is empty.")
+                         "not enable FedProx when the shared parameter set is empty. "
+                         "(Unreachable from _local_train_stage1, which calls under "
+                         "`if prox_pairs`; the real check is the setup guard on "
+                         "enc_param_names in federated_stage1.)")
     acc = None
     for p, r in pairs:
         d = p.float() - r
@@ -1210,6 +1311,27 @@ def federated_stage1(
                              collect_stats=(merge == "suffstat"), local_codebook=cb_local)
                for i, e in enumerate(client_entities)]
 
+    if merge == "fedavg" and len(clients[0].vqs) > 1:
+        # REFUSE rather than half-federate. The suff-stat path loops `c.vqs` and merges every
+        # Residual-VQ stage; the fedavg path below uses `c.vq` (== vqs[0]) throughout, so with
+        # more than one stage the later stages' codebooks would be EMA-updated locally by each
+        # client and never aggregated or broadcast — the clients would silently diverge on
+        # them. The post-merge broadcast assert also only inspects stage 0, so nothing would
+        # catch it, and `merge='fedavg'` is the primitive of two REPORTING rows
+        # (federated_fedavg_cb_only, federated_fedavg_cb_sharedprior).
+        #
+        # Not fixed by federating the later stages instead: this arm is a deliberate strawman
+        # whose whole point is that the codebook moves locally, so "the right way to weight-
+        # average a residual dictionary" is not a question it should be answering. Refusing
+        # keeps a silently wrong number from ever being produced; implement the loop only if a
+        # multi-stage weight-averaged arm is genuinely wanted.
+        raise ValueError(
+            f"merge='fedavg' federates STAGE 0 ONLY, but this quantizer has "
+            f"{len(clients[0].vqs)} Residual-VQ stages ({base_cfg.quantizer.name!r}). The "
+            f"later stages would train locally and never be aggregated, and the broadcast "
+            f"assert would not notice. Use merge='suffstat' (which merges every stage) or "
+            f"run this arm with a single-stage quantizer.")
+
     if cb_local:
         # merge='local': the DICTIONARY is never federated. Each client k-means-seeds its own
         # codebook on its own first batch and EMA-updates it, exactly as the `local` baseline
@@ -1278,6 +1400,26 @@ def federated_stage1(
         bn_label = {"buffers_local": "BN affine SHARED, running stats local (NOT FedBN)",
                     "fedbn": "whole BN layer local (FedBN, Li et al. ICLR'21)",
                     "shared": "BN affine shared + running stats POOLED"}[enc_bn]
+        if not enc_avg:
+            # THE BANNER MUST NOT OVERSTATE WHAT RUNS. `_fedavg_encoder` and, inside the same
+            # branch, `_pool_encoder_bn` are both gated on `enc_avg`, which pure fedproto
+            # (no --fedproto-fedavg) sets False: the round loop never runs a server weight
+            # step, so nothing about BN is federated after the common init — neither the
+            # affine parameters nor the running statistics. Printing "affine shared /
+            # stats POOLED" there would describe code that is skipped.
+            #
+            # Rewritten rather than REFUSED, on purpose: `--fed-enc-bn` also selects WHICH
+            # tensors enter `enc_keys`, and under fedproto that set still does real work —
+            # it defines the common init and the denominator of the drift telemetry
+            # (`enc_drift`, `enc_step`). So `fedproto --fed-enc-bn shared` is a meaningful,
+            # if easily misread, configuration; only the banner was wrong.
+            bn_label = {
+                "buffers_local": "BN affine shared AT INIT ONLY, running stats local",
+                "fedbn": "whole BN layer local (FedBN) — and nothing else is averaged either",
+                "shared": ("BN affine + running stats shared AT INIT ONLY — NOT pooled per "
+                           "round (_pool_encoder_bn runs only in the aggregation step this "
+                           "algo skips; use --fedproto-fedavg for the hybrid that pools)"),
+            }[enc_bn]
         print(f"[fed] encoder federation={fed_encoder} algo={enc_fed_algo}: {len(enc_keys)} shared "
               f"tensors ({len(enc_param_names)} params), {detail}; {bn_label}"
               f"{' + first %d blocks local' % enc_split_at if fed_encoder == 'partial' else ''}")
@@ -1295,10 +1437,37 @@ def federated_stage1(
                     "usual FL permutation/alignment problem, here at the dictionary level).\n"
                     "Use merge='suffstat' for fedproto, or federate the encoder with\n"
                     "fedavg/fedprox if you want a local codebook.")
+            if enc_proto_code_weight not in {"uniform", "count"}:
+                # The last unvalidated knob of the trio. `_proto_term` branches
+                # `if code_weight == "count": … else: …`, so a typo does not fail — it runs
+                # the UNIFORM weighting under a label nobody would read again, exactly the
+                # silent-fallback failure the enc_fed_algo / enc_prox_form / enc_proto_agg
+                # checks exist to prevent.
+                raise ValueError(f"unknown enc_proto_code_weight {enc_proto_code_weight!r} "
+                                 f"(use 'uniform' or 'count')")
             if len(clients[0].vqs) > 1:
                 print(f"[fed] WARNING: Residual-VQ with {len(clients[0].vqs)} stages — the prototype "
                       f"term uses STAGE 0 ONLY. Later stages quantize a straight-through residual, "
                       f"so their tokens carry no gradient to the encoder.")
+            if enc_proto_agg == "count":
+                # Twin of the fedprox mu-below-the-floor warning below, and for the same
+                # reason: an arm that cannot carry information must not be reported as a null.
+                # Under agg='count' the prototype target is p̄_k = Σ_j m_j^k / Σ_j n_j^k, which
+                # is the Prop.1 merge `e = M/smoothed(N)` on the SAME round's (N, M) — the
+                # codebook this loop has already broadcast to every client (measured with
+                # this repo's own functions: ‖p_count − e‖/‖e‖ = 3.3e-08, and the paper's
+                # 2e-8 on the toy). The pull then targets a vector the commitment loss is
+                # already pulling toward, so nothing crosses the network that
+                # `federated_cb_only` + common-init does not already send.
+                print(f"[fed] WARNING: fedproto agg='count' — the prototype target IS the merged "
+                      f"codebook (rel err ~1e-8), so this arm carries NO cross-client information "
+                      f"beyond federated_cb_only + common init: it is a reweighted commitment term "
+                      f"under a FedProto label. Check proto_agg_gap in the round log — the "
+                      f"pre-registered kill rule (documentation/FED_ENCODER_ALGOS.md) is 5%, and "
+                      f"'count' pins the gap at ~0 BY CONSTRUCTION. The non-degenerate reading is "
+                      f"agg='uniform' — one vote per client, which is what the authors' released "
+                      f"`proto_aggregation` computes even though Eq. 6 of the paper is written "
+                      f"count-weighted; here that textual reading is the degenerate one.")
             for c in clients:
                 c.proto_weight = float(enc_proto_weight)
                 c.proto_code_weight = enc_proto_code_weight
@@ -1310,8 +1479,45 @@ def federated_stage1(
         if enc_fed_algo == "fedprox":
             if enc_prox_form not in {"loss", "decoupled"}:
                 raise ValueError(f"unknown enc_prox_form {enc_prox_form!r} (use 'loss' or 'decoupled')")
+            if enc_prox_mu > 0 and not enc_param_names:
+                # `_prox_term`'s stated contract, checked where it is decidable. The shared
+                # SET is non-empty (guarded above) but may hold only buffers — no gradient,
+                # no anchor — and then `_local_train_stage1` builds an empty `prox_pairs`,
+                # skips the penalty and reports prox_term=NaN, i.e. an arm labelled FedProx
+                # that IS FedAvg. Refuse instead of producing that row.
+                raise SystemExit(
+                    f"fedprox mu={enc_prox_mu} but the shared encoder set contains 0 "
+                    f"PARAMETERS ({len(enc_keys)} tensors, all buffers) — the proximal "
+                    f"anchor has nothing to pull and this arm would be plain FedAvg. "
+                    f"Check --fed-enc-scope/--fed-enc-bn against the model's parameter names.")
             if enc_prox_mu <= 0:
                 print("[fed] NOTE: fedprox with mu=0 — identical to fedavg by construction.")
+            elif enc_prox_form == "decoupled":
+                # TWIN OF THE 'loss' WARNING BELOW, for the form whose real knob is lr*mu.
+                # Each APPLIED step contracts the drift by (1 - lr*mu), so a round removes
+                # 1-(1-lr*mu)^steps of it — the pre-registered `prox_pull_frac >= 5%` gate
+                # (documentation/FED_ENCODER_ALGOS.md). At the default lr=1e-3 and mu=0.01
+                # that is 0.015%/round: ~330x under the gate, and until now silent.
+                #
+                # `steps` is the OPTIMISTIC estimate local_epochs x len(train_loader) of
+                # client 0 (the real count drops with GradScaler skips and varies per client,
+                # and under enc_sched='cosine' the average lr is BELOW the peak) — so the
+                # warning fires only when even the friendliest arithmetic is under the gate.
+                # `initial_lr` and not the live lr: a freshly attached warmup schedule reads
+                # lr=0 at t=0, which would make every run look dead.
+                g0 = clients[0].opt.param_groups[0]
+                lr0 = float(g0.get("initial_lr", g0["lr"]))
+                est_steps = max(1, local_epochs * len(clients[0].data.train_loader))
+                a = min(1.0, lr0 * enc_prox_mu)
+                pull = 1.0 - (1.0 - a) ** est_steps
+                if pull < 0.05:
+                    print(f"[fed] WARNING: fedprox form='decoupled' with mu={enc_prox_mu} at "
+                          f"lr={lr0:g} removes an estimated {pull:.3%} of the drift per round "
+                          f"(<= {est_steps} steps) — under the pre-registered prox_pull_frac >= 5% "
+                          f"gate, so the anchor has no authority over a round and 'FedProx ties "
+                          f"FedAvg' would be a statement about the solver. The knob is lr*mu "
+                          f"(={a:.2g}), NOT mu: reach 5% by raising mu by decades. Read "
+                          f"prox_pull_frac in the round log for the measured value.")
             elif enc_prox_form == "loss" and enc_prox_mu < 0.1:
                 # Measured on toy: mu=0.1 gives prox_grad_ratio 1.7e-4..5.5e-3, i.e. the
                 # penalty is 2-3 orders of magnitude under the data gradient. Anything
@@ -1326,18 +1532,12 @@ def federated_stage1(
                 c.prox_form = enc_prox_form
     enc_prox_ref_needed = bool(enc_keys) and enc_fed_algo == "fedprox" and enc_prox_mu > 0
     enc_proto_on = bool(enc_keys) and enc_fed_algo == "fedproto" and enc_proto_weight > 0
-    if enc_proto_on and enc_proto_seed_round0:
-        # Without this the encoder is unfederated for the whole of round 0 (prototypes only
-        # exist once a round of stats has been collected), so a 3-round smoke run would
-        # federate in 2 of 3 rounds and the arm's budget would not match its siblings'. The
-        # broadcast codebook IS the count-aggregated prototype by definition, so seeding
-        # with it is the arm's own definition under agg='count' and an explicit, logged
-        # warm start under 'uniform'.
-        for c, d in zip(clients, devices):
-            c.protos = [c.vqs[0].codebook.weight.detach().clone().to(d)]
-            c.proto_mask = [torch.ones(K, dtype=torch.bool, device=d)]
-        print(f"[fed] fedproto: round-0 prototypes seeded from the broadcast codebook "
-              f"(agg={enc_proto_agg}, code_weight={enc_proto_code_weight})")
+    # NOTE: the round-0 prototype seeding used to sit HERE, and that was a bug on the resume
+    # path — `_load_resume` runs further down and never touches `client.protos`, so a resumed
+    # fedproto run entered round 0 pulling toward the codebook of the freshly BUILT client
+    # (random init), not the restored one. It is now done in `_seed_round0_protos()` below,
+    # after the resume. Non-resumed runs are byte-identical: the codebook they seed from is
+    # the same broadcast one either way.
 
     # B1: probe-based alignment. Encoders stay LOCAL; a per-round consensus encoding of a
     # SHARED public probe is broadcast and each client is pulled toward it (permutation-free).
@@ -1399,6 +1599,21 @@ def federated_stage1(
         print(f"[fed] continuing: rounds {rounds_done} -> {rounds_done + rounds} "
               f"({rounds} more)")
 
+    # Round-0 prototypes, seeded from the codebook the clients ACTUALLY hold — i.e. after the
+    # resume, not before it. Without any seeding the encoder is unfederated for the whole of
+    # round 0 (prototypes only exist once a round of stats has been collected), so a 3-round
+    # smoke would federate in 2 of 3 rounds and the arm's budget would not match its siblings'.
+    # The broadcast codebook IS the count-aggregated prototype by definition, so seeding with
+    # it is the arm's own definition under agg='count' and an explicit, logged warm start
+    # under 'uniform'.
+    if enc_proto_on and enc_proto_seed_round0:
+        for c, d in zip(clients, devices):
+            c.protos = [c.vqs[0].codebook.weight.detach().clone().to(d)]
+            c.proto_mask = [torch.ones(K, dtype=torch.bool, device=d)]
+        print(f"[fed] fedproto: round-0 prototypes seeded from the broadcast codebook "
+              f"(agg={enc_proto_agg}, code_weight={enc_proto_code_weight}"
+              f"{', post-resume' if resume_from is not None else ''})")
+
     history: list[dict] = []
     best_val, best_round, best_cb, best_states = float("inf"), None, None, None
     # Codebook-drift telemetry: ‖e^t − e^(t-1)‖ per round. Round 0 measures movement from
@@ -1445,7 +1660,7 @@ def federated_stage1(
                 # ABSOLUTE round index: a resumed run must continue the RNG stream, not replay
                 # round 0's batch order. `rounds_done` is 0 for every non-resumed run, so this
                 # is byte-identical to the previous behaviour there.
-                torch.manual_seed(seed * 1000 + (rounds_done + r) * 100 + ci)
+                torch.manual_seed(_round_seed(seed, rounds_done + r, ci, stage=1))
                 losses.append(_local_train_stage1(c, local_epochs, d))   # trains ALL stages at once
                 if viz is not None:                    # opt-in: recon + latent dump (eval/no_grad, RNG-safe)
                     viz.capture_client(c, r, d)
@@ -1509,7 +1724,7 @@ def federated_stage1(
             # divergence is contribution (A)'s target, and it is preserved.
             ws = []
             for ci, (c, d) in enumerate(zip(clients, devices)):
-                torch.manual_seed(seed * 1000 + (rounds_done + r) * 100 + ci)
+                torch.manual_seed(_round_seed(seed, rounds_done + r, ci, stage=1))
                 losses.append(_local_train_stage1(c, local_epochs, d))
                 ws.append(float(len(c.data.train_dataset)))
             N = torch.stack([c.vq.ema_cluster_size.detach().cpu() for c in clients]).sum(0)  # usage diag
@@ -1529,7 +1744,7 @@ def federated_stage1(
             # client's VQ moved under its own EMA + dead-code expiry during
             # `_local_train_stage1`, and nothing is merged or broadcast.
             for ci, (c, d) in enumerate(zip(clients, devices)):
-                torch.manual_seed(seed * 1000 + (rounds_done + r) * 100 + ci)
+                torch.manual_seed(_round_seed(seed, rounds_done + r, ci, stage=1))
                 losses.append(_local_train_stage1(c, local_epochs, d))
                 if viz is not None:
                     viz.capture_client(c, r, d)
@@ -1847,6 +2062,10 @@ def federated_stage2(
     tau_steps: int = 0,            # >0 ⇒ FedSGD: τ optimizer STEPS per round (not epochs). The R1 regime.
     server_opt: str = "sgd",       # "sgd" (plain/FedAvgM) | "fedadam" (adaptive server optimizer, FedOpt)
     server_lr: float = 0.01,       # FedAdam server step size η
+    patience_rounds: int = 0,      # 0 = off. >0 = stop once the cohort val loss has not
+                                   # improved for N rounds, so a generous --s2-rounds budget
+                                   # can be over-provisioned safely (same contract as
+                                   # federated_stage1). Needs select_on_val.
 ) -> tuple[list[Stage2ClientState], list[dict], float]:
     # CO-LOCATE with the frozen stage1 encoder: Stage2System wraps s1c.model, so the
     # prior MUST land on the same GPU or the forward throws a device mismatch.
@@ -1890,10 +2109,21 @@ def federated_stage2(
 
     history: list[dict] = []
     best_val, best_round, best_states = float("inf"), None, None
+    # Round-level convergence stop, same contract as federated_stage1. Without it whatever
+    # --s2-rounds happens to be IS the budget: there is no early stop, so the shared prior
+    # body trains for exactly that many rounds and the truncation alarm can only report the
+    # fact after the fact. With it, --s2-rounds becomes a ceiling that can be over-provisioned
+    # safely -- which is the project's hard rule (train to convergence, never a fixed budget).
+    stale = 0
+    min_delta = float(getattr(base_cfg.training, "early_stopping_min_delta", 0.0))
+    if patience_rounds > 0:
+        print(f"[fed-s2] convergence stop ARMED: patience={patience_rounds} rounds, "
+              f"min_delta={min_delta:g} (needs select_on_val: "
+              f"{'ON' if select_on_val else 'OFF -> the stop will be DISABLED'})")
     for r in range(rounds):
         sds, weights, losses = [], [], []
         for ci, (c, d) in enumerate(zip(clients, devices)):
-            torch.manual_seed(seed * 7000 + r * 100 + ci)
+            torch.manual_seed(_round_seed(seed, r, ci, stage=2))
             losses.append(_local_train_prior_steps(c, tau_steps, d) if tau_steps > 0
                           else _local_train_prior(c, local_epochs, d))
             sds.append({k: c.s2.prior.state_dict()[k].detach().clone() for k in shared_keys})
@@ -1935,9 +2165,22 @@ def federated_stage2(
         # Snapshot the FULL prior state (shared body + each client's local head): the
         # head co-adapts to the body, so rolling the body back to round k while leaving
         # a head trained to round R would ship a pair that never existed.
+        improved = math.isfinite(val_loss) and val_loss < best_val - min_delta
         if math.isfinite(val_loss) and val_loss < best_val:
             best_val, best_round = val_loss, r
             best_states = [copy.deepcopy(c.s2.prior.state_dict()) for c in clients]
+        # ── convergence stop ─────────────────────────────────────────────────
+        if patience_rounds > 0 and math.isfinite(val_loss):
+            stale = 0 if improved else stale + 1
+            if stale >= patience_rounds:
+                print(f"[fed-s2] CONVERGED: no val improvement > {min_delta:g} for {stale} "
+                      f"rounds (best={best_val:.5f} at round {best_round}); stopping at "
+                      f"round {r} of {rounds - 1}.")
+                history[-1]["converged_stop"] = True
+                break
+        elif patience_rounds > 0:
+            print("[fed-s2] patience_rounds set but val is not finite — is select_on_val on? "
+                  "Convergence stop DISABLED for this run.")
 
     # ── TRUNCATION ALARM ────────────────────────────────────────────────────────
     # A run whose BEST round is its LAST round was still improving when the budget ran out:
@@ -1949,14 +2192,15 @@ def federated_stage2(
     # output said so. Now it does, loudly, in every run that ends this way.
     if math.isfinite(best_val) and best_round == rounds - 1 and rounds > 1:
         print("\n" + "!" * 78)
+        # `rounds_done` belongs to federated_stage1, NOT here: this f-string used to raise
+        # NameError and kill the job AFTER all training, in exactly the case the alarm exists
+        # to report. Stage 2 has no resume path, so its round index is already absolute.
         print("!! TRUNCATED, NOT CONVERGED: the best validation round IS the last round "
-              f"({rounds_done + best_round}).")
+              f"({best_round}).")
         print("!! The model was still improving when the round budget ran out, so this run "
               "reports an")
         print("!! UNDERTRAINED model. On wsd c3 that difference was VUS-PR 0.16 vs 0.69.")
-        print("!! Fix: raise --s1-rounds and add --fed-patience-rounds N so the run stops "
-              "where it")
-        print("!! actually flattens, or continue this one with --resume-from.")
+        print("!! Fix: raise --s2-rounds so the run stops where it actually flattens.")
         print("!" * 78 + "\n", flush=True)
         history[-1]["truncated"] = True
 
@@ -2117,7 +2361,7 @@ def federated_stage2_proto(
         pbar = _consensus_prototype(clients, probe_masked, device) if (r > 0 and proto_weight > 0) else None
         losses = []
         for ci, (c, d) in enumerate(zip(clients, devices)):
-            torch.manual_seed(seed * 7000 + r * 100 + ci)
+            torch.manual_seed(_round_seed(seed, r, ci, stage=2))
             losses.append(_local_train_prior_proto(
                 c, local_epochs, d, probe_masked, probe_mask, pbar, proto_weight, batch))
         history.append({"round": r, "mean_loss": sum(losses) / len(losses)})

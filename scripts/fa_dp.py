@@ -1,5 +1,37 @@
+# ═══════════ RETRACTED / FROZEN — DO NOT RUN — the scripts/fa_*.py suite, 2026-07-27 ═══════════
+# CAUSE      mixture_eval._load_pool loads ONE stage-1 (client have[0]'s) and tokenizes EVERY
+#            client with it, while `federated_cb_only` federates only the CODEBOOK: encoders stay
+#            local and diverge (cross-client token agreement measured 0.0000). Each client's prior
+#            is scored on symbols it never saw. Deliberately NOT fixed here — repairing the
+#            contamination is the owner's research decision, not a cleanup.
+# RESULTS    NONE, ever: zero fa_* rows anywhere under artifacts/ (including the read-only
+#            history artifacts/_archive_20260729/) and zero logs under logs/. No number this
+#            file could print has ever been measured, so there is nothing here to cite.
+# RETRACTED  The claim carried by 13 of the 14 fa_* docstrings — that these numbers sit on "the
+#            same axis as the converged local / cb_only / centralized reports" — is FALSE
+#            (documentation/RESEARCH_LEDGER.md, Group 4): a deployed cb_only client tokenizes
+#            with its OWN encoder, so this layer measures an upper bound no deployment can
+#            reach. Marked [RETRACTED] inline below wherever it occurs.
+# REOPENING  needs an arm whose encoders are bit-identical across clients (`federated_enc_fedavg`);
+#            see documentation/LAUNCH_RUNBOOK.md §5.2b. Entry points are guarded: this suite's
+#            launcher scripts/launch_all_fa.sh refuses with exit 2 unless FA_I_KNOW_ITS_SHELVED=1.
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+#
+# ── E4/DP-SPECIFIC RETRACTION (2026-07-15 audit; documentation/RESEARCH_LEDGER.md, header) ──
+# THIS FILE DOES NOT PROVIDE DIFFERENTIAL PRIVACY. `sigma` below is NOT an ε and no (ε, δ) can
+# be derived from it:
+#   * there is no per-client clipping, so the L2 sensitivity of the count aggregate is UNBOUNDED;
+#   * the noise scale is calibrated to N_train / K, i.e. it is a function of the PRIVATE data;
+#   * the codebook statistic this rides on is released EVERY round (37-93 of them), so its budget
+#     composes exactly like DP-SGD — the "ε paid once" advantage exists only for a genuinely
+#     one-shot release such as the token histogram.
+# The honest reading of anything this script could produce is "robustness to additive noise",
+# NOT a privacy guarantee, and the "DP-graceful vs DP-SGD" selling point is WITHDRAWN. The code
+# is kept as-is on purpose; only the claim is retracted.
 """
 E8 — DIFFERENTIAL-PRIVACY TRADEOFF for the pooled per-position count prior (FA).
+[RETRACTED — not DP: no clipping, unbounded sensitivity, data-dependent noise scale, per-round
+ composition. See the E4/DP-SPECIFIC RETRACTION banner above. Read "sigma" as noise, not ε.]
 
 Federated Analytics angle: the pooled per-position unigram over the K-codeword
 grid (E1) is an EXACTLY-mergeable aggregate — an additive per-position histogram
@@ -15,6 +47,8 @@ The noised count prior is then scored with detect.py's REAL machinery (rolling
 assembly, paper per-tau threshold, VUS / PATE) via mixture_eval._score_entity,
 so the VUS-PR / AUPRC / PATE numbers land on the SAME axis as the converged
 local / cb_only / centralized reports.
+  ^^^ [RETRACTED 2026-07-27 — FALSE. See the banner at the top of this file: cb_only shares only
+      the codebook, so the common tokenizer this sentence assumes does not exist.]
 
 Optionally backs off to each client's own deep-local cb_only prior with weight
 `--lam`:  combined per-token NLL = (1-lam) * count_nll + lam * deep_local_nll.
@@ -23,6 +57,8 @@ With lam=0 (default) the noised count prior is a STANDALONE scorer.
 EXPECTED: graceful degradation of VUS-PR as sigma grows — a robust additive
 aggregate tolerates DP noise, a selling point vs FL where per-round DP-SGD noise
 on gradients compounds across communication rounds.
+  ^^^ [RETRACTED 2026-07-15 — the "selling point vs DP-SGD" is withdrawn: the codebook statistic
+      is re-released every round, so this composes like DP-SGD too. Noise robustness ≠ privacy.]
 
 Variants = the sigma levels. Per (cluster, seed, sigma[, lam]) we write
     artifacts/fed_eval/fa_dp/<ds>/<cluster>/seed<n>/<variant>/<entity>/report.json
@@ -196,7 +232,13 @@ def main() -> int:
 
     OUT_ROOT.mkdir(parents=True, exist_ok=True)
     rec_path = OUT_ROOT / f"records_{args.dataset}.jsonl"
-    rec_fh = rec_path.open("w")
+    # Refuse to truncate the ledger to nothing (same guard as mixture_eval:295-303). This script
+    # STREAMS records (one flushed write per row, crash-resilient), so it cannot decide at the
+    # END whether to open the file: instead the truncating open("w") is DEFERRED to the first
+    # record. A run that scores zero entities therefore never touches rec_path and raises below,
+    # so a good records file is never overwritten with 0 bytes — and a 0-byte ledger is
+    # indistinguishable from "never run" for every downstream reducer.
+    rec_fh = None
 
     n_written = 0
     for cluster in clusters:
@@ -235,6 +277,8 @@ def main() -> int:
                            "_entity": e,
                            **{k: float(rep[k]) for k in ("vus_pr", "auprc", "pate_f1", "auroc")
                               if isinstance(rep.get(k), (int, float)) and np.isfinite(rep.get(k))}}
+                    if rec_fh is None:                     # first record: NOW truncate + open
+                        rec_fh = rec_path.open("w")
                     rec_fh.write(json.dumps(rec) + "\n")
                     rec_fh.flush()
                     n_written += 1
@@ -247,6 +291,12 @@ def main() -> int:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
+    if rec_fh is None:
+        raise SystemExit(
+            "[fa_dp] produced 0 records — refusing to write an empty ledger.\n"
+            "  Every (cluster, seed) was skipped: the per-arm checkpoints are missing.\n"
+            "  Fix the inputs; do not let this overwrite an existing records file."
+        )
     rec_fh.close()
     print(f"[fa_dp] wrote {n_written} records -> {rec_path}")
     return 0

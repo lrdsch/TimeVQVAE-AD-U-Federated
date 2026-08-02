@@ -1,3 +1,21 @@
+# ═══════════ RETRACTED / FROZEN — DO NOT RUN — the scripts/fa_*.py suite, 2026-07-27 ═══════════
+# CAUSE      mixture_eval._load_pool loads ONE stage-1 (client have[0]'s) and tokenizes EVERY
+#            client with it, while `federated_cb_only` federates only the CODEBOOK: encoders stay
+#            local and diverge (cross-client token agreement measured 0.0000). Each client's prior
+#            is scored on symbols it never saw. Deliberately NOT fixed here — repairing the
+#            contamination is the owner's research decision, not a cleanup.
+# RESULTS    NONE, ever: zero fa_* rows anywhere under artifacts/ (including the read-only
+#            history artifacts/_archive_20260729/) and zero logs under logs/. No number this
+#            file could print has ever been measured, so there is nothing here to cite.
+# RETRACTED  The claim carried by 13 of the 14 fa_* docstrings — that these numbers sit on "the
+#            same axis as the converged local / cb_only / centralized reports" — is FALSE
+#            (documentation/RESEARCH_LEDGER.md, Group 4): a deployed cb_only client tokenizes
+#            with its OWN encoder, so this layer measures an upper bound no deployment can
+#            reach. Marked [RETRACTED] inline below wherever it occurs.
+# REOPENING  needs an arm whose encoders are bit-identical across clients (`federated_enc_fedavg`);
+#            see documentation/LAUNCH_RUNBOOK.md §5.2b. Entry points are guarded: this suite's
+#            launcher scripts/launch_all_fa.sh refuses with exit 2 unless FA_I_KNOW_ITS_SHELVED=1.
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
 """
 E14 — CODEBOOK MERGE VARIANTS (Federated Analytics, retraining, bounded scope).
 
@@ -34,6 +52,8 @@ merged codebook, fully-local prior = cb_only recipe), and score. Everything
 downstream (rolling assembly, paper threshold, VUS-PR/AUPRC/PATE) is the EXACT
 detect.py machinery via mixture_eval._score_entity — directly comparable to the
 converged `federated_cb_only` reports.
+  ^^^ [RETRACTED 2026-07-27 — FALSE. See the banner at the top of this file: cb_only shares only
+      the codebook, so the common tokenizer this sentence assumes does not exist.]
 
 Decision this gates:
   * uniform ≈ suffstat_nk           → the n_k-weighting of the merge is inert;
@@ -312,6 +332,17 @@ def main() -> int:
             del clients, client_by_e
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+
+    # Refuse to truncate the ledger to nothing (same guard as mixture_eval:295-303). The file
+    # is opened in "w", so a run that scored zero entities would OVERWRITE a good records file
+    # with 0 bytes — and a 0-byte ledger is indistinguishable from "never run" for every
+    # downstream reducer.
+    if not all_records:
+        raise SystemExit(
+            "[fa_mergevar] produced 0 records — refusing to write an empty ledger.\n"
+            "  Every (cluster, seed) was skipped: the per-arm checkpoints are missing.\n"
+            "  Fix the inputs; do not let this overwrite an existing records file."
+        )
 
     OUT_ROOT.mkdir(parents=True, exist_ok=True)
     rec_path = OUT_ROOT / f"records_{args.dataset}.jsonl"

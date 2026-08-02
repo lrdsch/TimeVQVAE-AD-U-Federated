@@ -204,6 +204,31 @@ def main() -> int:
     d = w_avg - w_pool
     print(f"  excess objective J(w_avg)-J(w*) = (w_avg-w*)' A (w_avg-w*) = {float(d @ A @ d):.4e}")
 
+    # ── cross-check against the production module ───────────────────────────
+    # This file keeps its OWN implementation on purpose — an independent second
+    # opinion is what makes the exactness check above worth anything. The point
+    # of duplication is lost the moment the two silently diverge, so assert they
+    # agree: same head, same statistics, same solution at a matched lambda.
+    rule("STEP 7 — cross-check: this demo vs scripts/floor_heads.py")
+    sys.path.insert(0, str(REPO / "scripts"))
+    import floor_heads as FH
+    head_ma, head_ar = FH.MaCentered(), FH.AR(AR_P)
+    d_ma = np.abs(ma_c_score(xte) - head_ma.score_series(xte, {"k": K_MA})).max()
+    x0 = np.asarray(D_data.load_scaled_records(
+        (lambda c: (setattr(c.dataset, "entity_id", members[0]), c)[1])(copy.deepcopy(cfg))
+    )[0][0].X[:, 0], dtype=np.float64)
+    st_mine, st_theirs = suffstats(x0, AR_P), head_ar.stats([x0], 0, 1)
+    d_G = np.abs(st_mine["G"] - st_theirs["G"]).max() / np.abs(st_theirs["G"]).max()
+    lam = 1e-6 * np.trace(st_mine["G"]) / (AR_P * st_mine["n"])      # match solve_ridge
+    d_w = (np.abs(solve_ridge(st_mine) - head_ar.solve(st_theirs, {**FH.DEFAULTS,
+                                                                  "ar_lambda": lam})["w"]).max()
+           / np.abs(solve_ridge(st_mine)).max())
+    ok = d_ma < 1e-12 and d_G < 1e-10 and d_w < 1e-8
+    print(f"  ma_c score        max|Δ| = {d_ma:.2e}")
+    print(f"  AR Gram           rel    = {d_G:.2e}")
+    print(f"  AR solution w     rel    = {d_w:.2e}")
+    print(f"  -> two independent implementations {'AGREE' if ok else 'DISAGREE — FIX BEFORE USE'}")
+
     # ── figure ──────────────────────────────────────────────────────────────
     import matplotlib
     matplotlib.use("Agg")

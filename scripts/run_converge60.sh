@@ -36,6 +36,13 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; cd "$REPO"
 PY="${PY:-/home/leonardo/PhD/TimeVQVAE-AD-M/.venv/bin/python3.10}"
 export PIPELINE_PYTHON="$PY"
 
+# MPS: always point CUDA at the PRIVATE pipe directory owned by scripts/mps_ctl.sh. Harmless
+# when no daemon is up (CUDA falls back to plain time-slicing). What it prevents is silently
+# attaching to a daemon on the compiled-in default /tmp/nvidia-mps, which is created 0777
+# with a 0666 control socket -- on this shared box every other user's CUDA process lands on
+# it automatically and anyone can send it control commands. See scripts/mps_ctl.sh.
+MPS_CTL_ENV_ONLY=1 source "$REPO/scripts/mps_ctl.sh"
+
 LOGDIR="$REPO/logs/converge60"; RESDIR="$REPO/artifacts/converge60"
 CKPT="$RESDIR/ckpt"                                   # fed_history.json lives under --out-dir
 mkdir -p "$LOGDIR" "$RESDIR"

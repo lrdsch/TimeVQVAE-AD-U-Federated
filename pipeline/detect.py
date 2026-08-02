@@ -579,6 +579,50 @@ from metrics_core import (
 )
 
 
+# The tolerance the UCR-TSA protocol actually prescribes. TimeVQVAE-AD §5.1: "a single
+# predicted anomaly location ... within a range of ±100 data points from the true location";
+# "true location" means the SEGMENT, not a point -- Baldan et al. 2025 state it unambiguously
+# ("distance <= 100 points from any point on the anomaly"), which is exactly the rule below.
+#
+# We PIN `paper_metrics_tolerance` to 64 instead, so the window ablation compares W=128 and
+# W=2P with one fixed ruler (the default would be window_length//2, i.e. a ruler that moves
+# with the axis under test). Changing the pinned value is NOT an option: `metrics_tolerance`
+# is inside the cohort fingerprint (scripts/cohort.py:168), so it would orphan every cell
+# already on disk. Hence: report at the pinned tolerance AND, always, at the protocol one.
+#
+# Measured 2026-08-01 on 240 (arm, client) pairs: switching 64 -> 100 moves top-1 by exactly
+# 0.000, because the argmax distribution is bimodal -- 49.2% land dead on the segment, 0.0%
+# land anywhere in 1..100, 41.7% miss by >1000. The column exists for protocol fidelity, and
+# to be able to SHOW that the ruler does not drive the result.
+PROTOCOL_TOLERANCE = 100
+
+
+def _topk_at(pos: np.ndarray, scores: np.ndarray, tol: int,
+             ks: "list[int]") -> dict[str, float]:
+    """Top-K hit/miss at one tolerance. `tol` sets BOTH the minimum peak spacing and the
+    hit radius, so it must be applied to `find_peaks` too -- not just to the comparison."""
+    peak_idx, _ = find_peaks(scores, distance=tol)
+    if peak_idx.size > 0:
+        peaks_sorted = peak_idx[np.argsort(-scores[peak_idx], kind="stable")]
+    else:
+        peaks_sorted = np.empty(0, dtype=np.int64)
+
+    argmax_idx = int(np.argmax(scores))
+    out: dict[str, float] = {}
+    for k in ks:
+        if k == 1:
+            preds = np.array([argmax_idx], dtype=np.int64)
+        else:
+            preds = peaks_sorted[: min(k, peaks_sorted.size)]
+            # Edge case — fewer peaks than k: fall back to argmax so the
+            # top-1 hit still counts (prevents NaN when scores are flat).
+            if preds.size == 0:
+                preds = np.array([argmax_idx], dtype=np.int64)
+        hit = any(int(np.min(np.abs(pos - p))) <= tol for p in preds)
+        out[f"paper_top{k}_acc_at_{tol}"] = float(hit)
+    return out
+
+
 def _paper_metrics(labels: np.ndarray, scores: np.ndarray, cfg: Config) -> dict[str, float]:
     """Top-K detection accuracy via local-maxima ranking (paper evaluate.py).
 
@@ -590,36 +634,23 @@ def _paper_metrics(labels: np.ndarray, scores: np.ndarray, cfg: Config) -> dict[
           to be DISTINCT candidates instead of clustering inside one anomaly.
         * Hit if any prediction is within `tolerance` of any ground-truth
           positive timestep (= within the GT segment expanded by ±tolerance).
+
+    Emitted at the pinned `paper_metrics_tolerance` AND at `PROTOCOL_TOLERANCE` (see the
+    note above the constant). Keys are suffixed `_at_<tol>`, so the two never collide and
+    nothing that reads the old key changes behaviour.
     """
     if not cfg.evaluation.paper_metrics_enabled:
         return {}
     pos = np.flatnonzero(labels > 0)
     tol = cfg.evaluation.paper_metrics_tolerance
+    ks = list(cfg.evaluation.paper_metrics_top_k)
+    tols = [tol] if tol == PROTOCOL_TOLERANCE else [tol, PROTOCOL_TOLERANCE]
     if scores.size == 0 or pos.size == 0:
-        return {f"paper_top{k}_acc_at_{tol}": float("nan")
-                for k in cfg.evaluation.paper_metrics_top_k}
+        return {f"paper_top{k}_acc_at_{t}": float("nan") for t in tols for k in ks}
 
-    # Pre-compute local maxima sorted by score (descending). Used for K > 1.
-    peak_idx, _ = find_peaks(scores, distance=tol)
-    if peak_idx.size > 0:
-        peak_order = np.argsort(-scores[peak_idx], kind="stable")
-        peaks_sorted = peak_idx[peak_order]
-    else:
-        peaks_sorted = np.empty(0, dtype=np.int64)
-
-    argmax_idx = int(np.argmax(scores))
     out: dict[str, float] = {}
-    for k in cfg.evaluation.paper_metrics_top_k:
-        if k == 1:
-            preds = np.array([argmax_idx], dtype=np.int64)
-        else:
-            preds = peaks_sorted[: min(k, peaks_sorted.size)]
-            # Edge case — fewer peaks than k: fall back to argmax so the
-            # top-1 hit still counts (prevents NaN when scores are flat).
-            if preds.size == 0:
-                preds = np.array([argmax_idx], dtype=np.int64)
-        hit = any(int(np.min(np.abs(pos - p))) <= tol for p in preds)
-        out[f"paper_top{k}_acc_at_{tol}"] = float(hit)
+    for t in tols:
+        out.update(_topk_at(pos, scores, t, ks))
     return out
 
 
