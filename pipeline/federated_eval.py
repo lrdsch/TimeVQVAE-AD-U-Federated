@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import math
 import os
@@ -343,8 +344,17 @@ def _converged_loop(*, step_fn, val_fn, params, cfg, stage: int,
           f"warmup={warmup_steps} patience={patience_steps} "
           f"({batches_per_epoch} batches/epoch)", flush=True)
 
+    # `keep_last_weights` reproduces upstream's protocol: no checkpoint selection at
+    # all, the weights left by the last step are the weights that get scored. The
+    # snapshot is skipped entirely rather than taken-and-discarded — with no val
+    # loader (see `pool_val_into_train`) `best_state` would never be refreshed, and
+    # restoring it would silently load the INITIAL weights.
+    keep_last = bool(getattr(cfg.training, "keep_last_weights", False))
     best_val, best_step = float("inf"), 0
-    best_state = _snapshot(model_for_state)
+    best_state = None if keep_last else _snapshot(model_for_state)
+    if keep_last:
+        print(f"  [{label}] keep_last_weights: no best-on-val selection "
+              f"(upstream protocol — the final step's weights are kept)", flush=True)
     step, epoch, stop = 0, 0, False
     while not stop and epoch < max_epochs:
         tot, nb = 0.0, 0
@@ -387,7 +397,8 @@ def _converged_loop(*, step_fn, val_fn, params, cfg, stage: int,
         if ran_val and vnb:
             if va < best_val - cfg.training.early_stopping_min_delta:
                 best_val, best_step = va, step
-                best_state = _snapshot(model_for_state)
+                if not keep_last:
+                    best_state = _snapshot(model_for_state)
             elif (cfg.training.early_stopping and step >= warmup_steps
                   and step - best_step >= patience_steps):
                 # Gated on WARMUP, not on min_epochs: min_epochs raises max_steps to
@@ -398,9 +409,11 @@ def _converged_loop(*, step_fn, val_fn, params, cfg, stage: int,
                 stop = True
         epoch += 1
 
-    model_for_state.load_state_dict(best_state)          # restore BEST-on-val
+    if not keep_last:
+        model_for_state.load_state_dict(best_state)      # restore BEST-on-val
     print(f"  [{label}] done: {epoch} epochs, {step} steps, "
-          f"best val={best_val:.4f} @step {best_step}", flush=True)
+          f"{'kept LAST weights' if keep_last else f'best val={best_val:.4f} @step {best_step}'}",
+          flush=True)
 
 
 def _train_stage1_converged(model: Stage1VQVAE, train_loader, val_loader,
@@ -463,6 +476,31 @@ def _build_train_stage2_converged(cfg: Config, stage1: Stage1VQVAE, train_loader
     return s2
 
 
+def _records_fingerprint(ds) -> tuple:
+    """Source identity of a SlidingWindowDataset, INVARIANT to the per-client scaler.
+
+    Used to detect splits that several clients were each handed their own copy of.
+    Hashing the values does NOT work: on `ucr_split` the five val files on disk are
+    byte-identical (verified: one sha1 across all five `val/ucr_001_p*.npy`), but
+    `PerEntityScaler` fits on each client's own train shard, so by the time the
+    records reach here the five copies carry five different affine transforms and
+    hash five different ways.
+
+    So fingerprint the RANKS instead. A per-channel z-score is strictly increasing,
+    so it leaves the rank permutation untouched — same source under any client's
+    scaler gives the same fingerprint, while a genuinely different split gives a
+    different one. Exact integer comparison, no float tolerance to tune.
+    """
+    h = hashlib.sha1()
+    for r in getattr(ds, "records", []):
+        a = np.ascontiguousarray(r.X)
+        h.update(str(a.shape).encode())
+        for c in range(a.shape[1]):
+            h.update(np.argsort(np.argsort(a[:, c], kind="stable"),
+                                kind="stable").astype(np.int64).tobytes())
+    return (len(ds), h.hexdigest())
+
+
 def _pooled_loader(cfg: Config, entities: list[str], data_by_e: dict, cap: int = 0):
     """ONE loader over the CONCATENATION of every client's training windows.
 
@@ -477,7 +515,56 @@ def _pooled_loader(cfg: Config, entities: list[str], data_by_e: dict, cap: int =
     tracked whichever entity trained last, biasing the final codebook by loop
     order. Windows are already per-entity standardised, so concatenating is sound.
     """
-    ds = ConcatDataset([data_by_e[e].train_dataset for e in entities])
+    parts = [data_by_e[e].train_dataset for e in entities]
+    if getattr(cfg.dataset, "pool_val_into_train", False):
+        # The pooled arm is the ONE place where the 10% val holdout is removable:
+        # the union of the shards plus the val slice is the original UCR train
+        # series, which is what upstream trains on. Folding it back closes the last
+        # data-side deviation for `centralized` only (`train_local` and every
+        # federated arm are untouched — no client owns the pooled val).
+        if not getattr(cfg.training, "keep_last_weights", False):
+            raise ValueError(
+                "dataset.pool_val_into_train=True requires training.keep_last_weights=True: "
+                "no val loader is built, so the best-on-val snapshot is never refreshed and "
+                "restoring it would load the model's INITIAL weights."
+            )
+        # ⚠️ DEDUPLICATE. On `ucr_split` every client is served the SAME pre-built
+        # val slice ("using pre-built val from disk (1 record(s))" × 5), so a naive
+        # concat folds it in FIVE times: measured 15 465 = 5 × 3 093 val windows
+        # against 29 465 train ones, i.e. 34% of the pooled set would have been five
+        # copies of one tenth of the series. Harmless in `_pooled_val_loader` (a mean
+        # over duplicates is the same mean), NOT harmless as training data.
+        # See `_records_fingerprint` for why the dedup is rank-based: the five copies
+        # are byte-identical ON DISK but arrive here under five different per-client
+        # scalers, so a value hash reports them as five distinct splits.
+        #
+        # ⚠️ WHICH copy survives is arbitrary — the first client's, under ITS scaler.
+        # On `ucr_001` the sd ratio across the five shards is 1.04, so the choice is
+        # immaterial there; on a skewed series it would not be. The principled fix is
+        # the pooled/federated scaler (validated 2026-08-03 to 1e-14 by
+        # `scripts/fedscaler_train_probe.py`, still a probe rather than a code path).
+        seen, val_parts = set(), []
+        for e in entities:
+            ds = getattr(data_by_e[e], "val_dataset", None)
+            if ds is None or len(ds) == 0:
+                continue
+            key = _records_fingerprint(ds)
+            if key in seen:
+                continue
+            seen.add(key)
+            val_parts.append(ds)
+        n_tr = sum(len(d) for d in parts)
+        n_va = sum(len(d) for d in val_parts)
+        parts = parts + val_parts
+        print(f"[centralized] POOL VAL INTO TRAIN: {n_tr} + {n_va} = {n_tr + n_va} windows "
+              f"({len(val_parts)} distinct val split(s) across {len(entities)} clients); "
+              f"no validation loader, last-step weights kept")
+        # HONEST RESIDUAL: this still does not equal upstream's window count. Each
+        # shard is windowed independently, so the windows that would straddle a shard
+        # boundary do not exist — on ucr_001 that is 32 558 windows here against the
+        # 34 593 upstream gets from the contiguous 35 000-point series (94.1%). Closing
+        # that would mean re-splicing the shards, i.e. undoing the federated split.
+    ds = ConcatDataset(parts)
     if cap and cap < len(ds):
         idx = torch.randperm(len(ds))[:cap].tolist()   # seeded by seed_everything(seed) upstream
         ds = Subset(ds, idx)
@@ -489,6 +576,8 @@ def _pooled_val_loader(cfg: Config, entities: list[str], data_by_e: dict):
     """Validation twin of `_pooled_loader` — the pooled model must early-stop on the
     pooled val split, i.e. the same union of clients it trains on. Never capped and
     never shuffled: it is only ever consumed as a whole, in eval mode."""
+    if getattr(cfg.dataset, "pool_val_into_train", False):
+        return None                       # those windows are in the train loader now
     ds = ConcatDataset([data_by_e[e].val_dataset for e in entities])
     if len(ds) == 0:
         return None

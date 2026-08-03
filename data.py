@@ -560,6 +560,23 @@ def _tokens_config_hash(cfg: Config) -> str:
         "training":  _training,
         "seed":      cfg.seed,
     }
+    # Knobs added AFTER caches were already written to disk. Every one of them does
+    # change the stage-1 weights (hence the tokens) when flipped, so they must be in
+    # the hash — but including them unconditionally would rewrite the hash of every
+    # run that never touches them and invalidate the whole cache population for a
+    # value that is not actually different. So: hash them only when they are OFF the
+    # default. A default-valued field is dropped, reproducing the pre-existing hash
+    # byte-for-byte; any other value changes it, which is exactly the invalidation we
+    # want. Extend this dict, never the `subset` above, when adding such a knob.
+    _POST_HOC_DEFAULTS = {
+        "quantizer": {"kmeans_init": True},
+        "training":  {"keep_last_weights": False},
+        "dataset":   {"pool_val_into_train": False},
+    }
+    for _sec, _fields in _POST_HOC_DEFAULTS.items():
+        for _k, _default in _fields.items():
+            if subset[_sec].get(_k, _default) == _default:
+                subset[_sec].pop(_k, None)
     raw = json.dumps(subset, sort_keys=True, default=str)
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 

@@ -90,6 +90,7 @@ class SharedVectorQuantizer(nn.Module):
         ema_decay: float = 0.99,
         eps: float = 1e-5,
         threshold_ema_dead_code: int = 2,
+        kmeans_init: bool = True,
     ):
         super().__init__()
         self.embedding_dim = int(token_embedding_dim)
@@ -98,6 +99,9 @@ class SharedVectorQuantizer(nn.Module):
         self.ema_decay = float(ema_decay)
         self.eps = float(eps)
         self.threshold_dead_code = int(threshold_ema_dead_code)
+        # False = start from the uniform init and let the EMA do all the work, as
+        # upstream's vendored lucidrains VQ does (`kmeans_init=False`).
+        self.kmeans_init = bool(kmeans_init)
 
         self.codebook = nn.Embedding(self.codebook_size, self.embedding_dim)
         nn.init.uniform_(self.codebook.weight, -1.0 / self.codebook_size, 1.0 / self.codebook_size)
@@ -146,6 +150,11 @@ class SharedVectorQuantizer(nn.Module):
     @torch.no_grad()
     def _kmeans_init(self, flat_tokens: torch.Tensor) -> None:
         """Seed the codebook with real samples (just on the first training step)."""
+        if not self.kmeans_init:
+            # Mark it done so the branch is never re-entered, and so a checkpoint
+            # written in this mode reloads with the same flag state.
+            self.initialized.fill_(True)
+            return
         if self.initialized.item():
             return
         data = flat_tokens.detach().reshape(-1, self.embedding_dim)
@@ -381,6 +390,7 @@ class SharedCodebookPerChannelVQ(nn.Module):
         ema_decay: float = 0.99,
         eps: float = 1e-5,
         threshold_ema_dead_code: int = 2,
+        kmeans_init: bool = True,
     ):
         super().__init__()
         self._vq = SharedVectorQuantizer(
@@ -390,6 +400,7 @@ class SharedCodebookPerChannelVQ(nn.Module):
             ema_decay=ema_decay,
             eps=eps,
             threshold_ema_dead_code=threshold_ema_dead_code,
+            kmeans_init=kmeans_init,
         )
         self.codebook_size = int(codebook_size)
         self.commitment_weight = float(commitment_weight)
@@ -489,6 +500,7 @@ class ResidualSharedCodebookVQ(nn.Module):
         ema_decay: float = 0.99,
         eps: float = 1e-5,
         threshold_ema_dead_code: int = 2,
+        kmeans_init: bool = True,
     ):
         super().__init__()
         self.n_stages = int(n_stages)
@@ -499,6 +511,7 @@ class ResidualSharedCodebookVQ(nn.Module):
                 token_embedding_dim=token_embedding_dim, codebook_size=codebook_size,
                 commitment_weight=commitment_weight, ema_decay=ema_decay, eps=eps,
                 threshold_ema_dead_code=threshold_ema_dead_code,
+                kmeans_init=kmeans_init,
             ) for _ in range(self.n_stages)
         ])
         self.groups: int | None = None

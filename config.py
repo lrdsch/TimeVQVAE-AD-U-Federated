@@ -84,6 +84,24 @@ class DatasetConfig:
     eval_stride: int | None = None
     eval_stride_rate: float = 0.1
     validation_fraction: float = 0.2
+    # Read ONLY by `federated_eval._pooled_loader` (the `centralized` arm).
+    # False (default) = the pooled model trains on the union of the clients' TRAIN
+    # shards and early-stops on the union of their VAL splits. True = the val
+    # windows are folded back into the training set and no validation loader is
+    # built at all.
+    #
+    # Why it exists: on `ucr_split` the 5 client shards plus the held-out val slice
+    # reconstitute EXACTLY the original UCR train series (e.g. ucr_001: 31 500 +
+    # 3 500 = 35 000). Upstream trains on all 35 000; we train on 31 500 and spend
+    # the other 10% on stopping and weight selection. For the pooled arm — and only
+    # there — that last deviation is removable, which makes `centralized` directly
+    # comparable to an upstream run. Meaningless for `local` and for every federated
+    # arm (no client owns the pooled val), so nothing else reads it.
+    #
+    # ⚠️ Requires `training.keep_last_weights=True`: with no val loader the
+    # best-on-val snapshot is never refreshed, so restoring it would load the
+    # INITIAL weights. `_pooled_loader` enforces this rather than trusting the caller.
+    pool_val_into_train: bool = False
     scaling: str = "per_entity_standard"  # or "none" — per-(entity, channel) z-score, fit on train, applied before windowing
     window_normalization: str = "none"    # "none" | "zscore" — per-window z-norm applied at window extraction (paper-style); stacks on top of `scaling`
     batch_size_stage1: int = 256          # upstream (was 64); lr=1e-3 is upstream-validated at 256
@@ -128,12 +146,28 @@ class EncoderConfig:
     n_resnet_blocks: int = 4
     dropout: float = 0.2
     # Base conv width of the encoder/decoder BODY. Channels double per downsample
-    # stage from this base: with 16 and depth 3 the body is 16/32/64 (the top of
-    # the encoder body reaches width_base * 2**(depth-1)) — matching upstream
-    # TimeVQVAE-AD, which reaches dim=64. This is INDEPENDENT of
-    # quantizer.token_embedding_dim, which sets the latent/codebook width the body
-    # projects to. The historical fork default was 4 (body 4/8/16); checkpoints
-    # trained at 4 keep their un-suffixed run dirs (see run_name()).
+    # stage from this base.
+    #
+    # ⚠️ CORRECTION (2026-08-03). This comment used to claim that 16 "matches upstream
+    # TimeVQVAE-AD, which reaches dim=64". That is WRONG, and it propagated into the
+    # upstream-ablation design. It confused the top of the encoder BODY with the width
+    # of the FINAL projection. Read off upstream's OWN checkpoint
+    # (`TimeVQVAE-AnomalyDetection/saved_models/stage1-1.ckpt`, conv weight shapes),
+    # their encoder at W=408 is
+    #     EncBlock 2->4, 4->8, 8->16, 16->32, then ResBlock 32->64
+    # i.e. the body tops out at 32; only the last block reaches 64. Both repos resolve
+    # to depth 4 at this window (verified: H'=3, W'=25 on both sides).
+    #
+    #     width_base=4   ->  2->4, 4->8, 8->16, 16->32, project 32->64   = UPSTREAM
+    #     width_base=16  ->  2->16, 16->32, 32->64, 64->128, project 128->64
+    #
+    # So 16 is a body 4x wider than upstream at EVERY stage — a deliberate capacity
+    # increase, not a match. It is also the better choice on the evidence: narrowing to
+    # 4 costs 0.145 AUPRC on ucr_001 (the `width4` ablation cell). But it must not be
+    # described as faithful. INDEPENDENT of quantizer.token_embedding_dim, which sets
+    # the latent/codebook width the body projects to (64 — that one DOES match upstream).
+    #
+    # Checkpoints trained at 4 keep their un-suffixed run dirs (see run_name()).
     width_base: int = 16
     # Legacy only (not used by the target path):
     dim: int = 64
@@ -158,6 +192,13 @@ class QuantizerConfig:
     ema_decay: float = 0.99
     eps: float = 1e-5
     threshold_ema_dead_code: int = 2
+    # Seed the codebook from real encoder outputs on the first training batch.
+    # True (default) = this fork's behaviour. Upstream TimeVQVAE-AD passes
+    # `kmeans_init=False` to the vendored lucidrains VQ, so its codebook starts
+    # from the uniform init and is moved only by the EMA. Together with
+    # `ema_decay` and `threshold_ema_dead_code` this is the third of the three
+    # codebook-dynamics knobs that differ from upstream.
+    kmeans_init: bool = True
     # Residual VQ (name = "residual_shared_codebook_per_channel_vq"): number of stages.
     # Stage s quantizes the residual of stage s-1; reconstruction is the sum. Ignored by
     # the single-stage quantizer. Each stage federates independently by the same k-FED merge.
@@ -192,6 +233,20 @@ class PriorConfig:
     depth: int = 4
     heads: int = 4
     dropout: float = 0.2
+    # ─── Read ONLY by prior.name = "maskgit_upstream" ────────────────────────
+    # The verbatim upstream stack (x-transformers ContinuousTransformerWrapper +
+    # 1-D flat positional table). The three `nn.TransformerEncoder` priors ignore
+    # these fields entirely, so the defaults below never change their behaviour.
+    #
+    # Why they exist: the stock encoder derives the per-head dim from d_model
+    # (embed_dim/heads = 32 at the defaults) and the FF width from hidden_dim*4.
+    # Upstream instead runs attention at heads*attn_dim_head = 256 projected in and
+    # out of hidden_dim=128, i.e. a genuinely wider attention than ours — not a
+    # renaming. Values below are upstream's `configs/config.yaml` MaskGIT block.
+    attn_dim_head: int = 64
+    ff_mult: int = 4
+    use_rmsnorm: bool = False              # upstream: True
+    post_emb_norm: bool = False            # upstream: True
     choice_temperature: float = 4.0
     T: int = 20                           # sampling / iterative decoding steps
     mask_scheduling: str = "cosine"       # "cosine" | "linear" | "square" | "cubic"
@@ -270,6 +325,19 @@ class TrainingConfig:
     early_stopping_min_delta: float = 1e-4
     stage1_patience_steps: int = 2_000
     stage2_patience_steps: int = 5_000
+    # Which weights survive training. False (default) = restore the best-on-val
+    # snapshot, i.e. `stage{1,2}.py`'s `best.ckpt` semantics. True = keep whatever
+    # the last step left behind — upstream TimeVQVAE-AD's behaviour, where
+    # `pl.Trainer(enable_checkpointing=False)` + `trainer.save_checkpoint()` after
+    # `fit` saves the FINAL state and no callback ever selects a better one.
+    #
+    # ⚠️ This is NOT redundant with `early_stopping=False`. Disabling patience alone
+    # is a near no-op: training runs to the step cap and then reloads the snapshot
+    # from whenever val last improved — the same model, hours later. Reproducing the
+    # upstream protocol needs BOTH flags. (The `early_stopping_min_delta=-1e9` trick
+    # used by the 2026-08-03 `nostop` probe approximates this but keeps the state of
+    # the last COMPLETED epoch, up to one epoch short of the cap; this flag does not.)
+    keep_last_weights: bool = False
 
     # ─── Crash-safe resumable training (opt-in; default OFF = byte-identical) ───
     # See documentation/resume-and-telemetry-design.md. `resume` continues a

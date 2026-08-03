@@ -77,11 +77,142 @@ VARIANTI: dict[str, dict[str, tuple[object, object]]] = {
     # 64/64 soltanto perche' `launch.sh:34` passa `--batch 64`, che sovrascrive entrambi gli
     # stadi. Quindi la variante consiste nell'**omettere il flag**, non nel settare un campo.
     "batch_up":   {},
+    # — il criterio di ARRESTO, che non era nella lista delle otto —
+    #
+    # I tetti di step sono GIA' quelli di upstream: `stage1_max_steps=10_000`,
+    # `stage2_max_steps=50_000` (`config.py:254-255`). A fermarci prima sono DUE cose, e
+    # servono entrambe per riprodurre il loro protocollo:
+    #
+    #  1. la pazienza (`_converged_loop`, `federated_eval.py:392`). Su `ucr_001` lo stadio 1
+    #     si ferma a ~8 700 e lo stadio 2 a ~14 000: ci alleniamo circa un terzo di loro.
+    #     Si spegne con `early_stopping=False`.
+    #
+    #  2. ⚠️ il ripristino dei **pesi migliori su val** (`federated_eval.py:401`,
+    #     `load_state_dict(best_state)`), che upstream NON fa: Lightning salva lo stato
+    #     finale. Spegnere solo la pazienza sarebbe un NO-OP — si allenerebbe fino a 50 000
+    #     step per poi ricaricare i pesi del passo 14 000, cioe' lo stesso modello di adesso.
+    #
+    # Non c'e' un flag per (2), ma c'e' una leva pulita: `early_stopping_min_delta` negativo
+    # e grande rende `va < best_val - min_delta` sempre vero, quindi `best_state` viene
+    # ri-catturato a OGNI validazione e alla fine contiene l'ULTIMO stato, non il migliore.
+    # Nessuna patch al codice.
+    #
+    # ⚠️ Residuo noto: il ciclo esce a meta' epoca quando `step >= max_steps`, e dopo
+    # quell'uscita non gira una validazione. Quindi lo stato conservato e' quello della fine
+    # dell'ultima epoca completa — al piu' 271 batch prima del tetto, meno del 3%.
+    "nostop":     {"training.early_stopping": (False, True),
+                   "training.early_stopping_min_delta": (-1e9, 1e-4)},
+
+    # ─── `fidelity` — tutte le differenze insieme, l'ultima spiaggia ─────────
+    #
+    # Le varianti qui sopra muovono UNA differenza per volta, e tre su tre dicono che
+    # la nostra scelta e' migliore della loro. Eppure `centralized` sta 0,284 sotto gli
+    # autori su `ucr_001` e 0,417 sotto il loro codice girato da noi su `ucr_043`. Le due
+    # cose insieme non stanno in piedi: se ogni singolo asse ci vede avanti, la causa e'
+    # in un asse mai misurato, in un'interazione, o in un errore di porting.
+    #
+    # Questa variante porta il modello a upstream su TUTTI gli assi contemporaneamente.
+    # Non attribuisce niente — risponde a una domanda sola, ma quella che conta: **la
+    # fedelta' totale chiude il divario, si' o no?** Se no, la causa non e' nel modello e
+    # nemmeno nel protocollo, e l'unica cosa rimasta e' lo split federato stesso.
+    #
+    # ⚠️ Resta `centralized`, cioe' il federated POOLED. Non e' un fork del loro codice:
+    # e' il nostro arm, con le loro scelte. La scala della federazione regge.
+    "fidelity": {
+        # — stack del prior (i due assi MAI misurati, per mancanza di implementazione) —
+        "prior.name":          ("maskgit_upstream", "maskgit_3d_pos"),  # x-transformers + pos-emb 1-D piatta
+        "prior.use_rmsnorm":   (True,  False),
+        "prior.post_emb_norm": (True,  False),
+        "prior.embed_dim":     (64,    128),
+        "prior.dropout":       (0.3,   0.2),
+        # — dinamica del codebook (tutte e tre le differenze) —
+        "quantizer.ema_decay":               (0.8,  0.99),
+        "quantizer.kmeans_init":             (False, True),
+        "quantizer.threshold_ema_dead_code": (0,    2),
+        # — encoder —
+        # ⚠️ `width_base=4` E' la configurazione di upstream, verificata sul loro checkpoint
+        # `saved_models/stage1-1.ckpt` il 2026-08-03 leggendo le larghezze conv reali:
+        #
+        #   upstream            EncBlock 2->4, 4->8, 8->16, 16->32, poi ResBlock 32->64
+        #   noi width_base=4    Downsample 2->4, 4->8, 8->16, 16->32, poi Project 32->64   IDENTICO
+        #   noi width_base=16   Downsample 2->16, 16->32, 32->64, 64->128, poi Project 128->64
+        #
+        # Il commento a `config.py:130-137` afferma che 16 "matcha upstream, che arriva a
+        # dim=64": e' SBAGLIATO, confonde la larghezza massima del CORPO con quella della
+        # proiezione finale. Upstream arriva a 64 solo con l'ultimo ResBlock; il corpo si ferma
+        # a 32. A width_base=16 il nostro corpo e' 4x piu' largo del loro a ogni stadio.
+        # Entrambi hanno profondita' 4 su W=408 (verificato: H'=3, W'=25 da entrambe le parti).
+        "encoder.width_base":  (4,     16),
+        "encoder.dropout":     (0.3,   0.2),
+        # — numerica —
+        "training.amp":        (False, True),                            # fp32
+        # — protocollo: i tre punti di `nostop`, piu' il val —
+        "training.early_stopping":    (False, True),
+        "training.keep_last_weights": (True,  False),
+        "dataset.pool_val_into_train": (True, False),
+    },
+
+    # ─── `znorm` — la differenza che NON era nella lista delle otto ──────────
+    #
+    # Trovata il 2026-08-03 leggendo il loro codice dopo che l'ablazione era chiusa 7 su 7
+    # senza recuperi. Upstream normalizza **ogni singola finestra** (z-score per istanza),
+    # sia in training (`preprocessing/preprocess.py:149`, dentro `__getitem__`) sia in
+    # detect (`evaluation/__init__.py:117`). Noi usiamo lo scaling globale per-entita' e
+    # `window_normalization="none"`.
+    #
+    # Non e' una svista loro: il docstring di `scale()` lo motiva —
+    #   "instance-wise scaling. global-scaling is not used because there are time series
+    #    with local-mean-shifts such as UCR_Anomaly_sddb49_20000_67950_68200.txt"
+    #
+    # La loro `scale()` e' riga per riga il nostro `"zscore"` (media, std NON distorta,
+    # clamp a 1e-4), quindi il knob esiste gia': era solo spento.
+    #
+    # PROVA INDIPENDENTE: il loro modello addestrato, fatto girare nel NOSTRO detect senza
+    # normalizzazione, crolla a AUPRC 0,301 (top-1 a 0 su 4 client su 5) contro lo 0,887
+    # che ottiene nella loro pipeline. Un modello addestrato su finestre normalizzate a cui
+    # si danno finestre non normalizzate si degrada esattamente cosi'.
+    #
+    # ⚠️ Con la z-score per finestra lo scaler per-client diventa IRRILEVANTE (la
+    # normalizzazione e' invariante a qualunque affine precedente). Se questa variante
+    # recupera, l'intera classe di artefatti da scaler — [[detect-test-score-depends-on-
+    # train-shard]] e il fix dello scaler federato — sparisce per costruzione.
+    "znorm": {"dataset.window_normalization": ("zscore", "none")},
+
+    # `fidelity` + la normalizzazione per finestra: la ricetta pubblicata COMPLETA.
+    # `znorm` da sola dice se il pezzo mancante basta partendo dai NOSTRI default;
+    # questa dice dove arriva il metodo di upstream preso per intero.
+    "fidelity_znorm": {
+        "prior.name":          ("maskgit_upstream", "maskgit_3d_pos"),
+        "prior.use_rmsnorm":   (True,  False),
+        "prior.post_emb_norm": (True,  False),
+        "prior.embed_dim":     (64,    128),
+        "prior.dropout":       (0.3,   0.2),
+        "quantizer.ema_decay":               (0.8,  0.99),
+        "quantizer.kmeans_init":             (False, True),
+        "quantizer.threshold_ema_dead_code": (0,    2),
+        "encoder.width_base":  (4,     16),
+        "encoder.dropout":     (0.3,   0.2),
+        "training.amp":        (False, True),
+        "training.early_stopping":    (False, True),
+        "training.keep_last_weights": (True,  False),
+        "dataset.pool_val_into_train": (True, False),
+        "dataset.window_normalization": ("zscore", "none"),
+    },
+
+    # Isola il SOLO asse mai misurato: lo stack del prior. Se `fidelity` recupera e
+    # questa no, il merito e' altrove; se recuperano entrambe, e' qui. Tiene `--batch 64`
+    # e ogni altro default nostro, quindi e' appaiata al riferimento della campagna.
+    "fidelity_prior": {
+        "prior.name":          ("maskgit_upstream", "maskgit_3d_pos"),
+        "prior.use_rmsnorm":   (True,  False),
+        "prior.post_emb_norm": (True,  False),
+        "prior.embed_dim":     (64,    128),
+    },
 }
 
 # Varianti che devono NON ricevere `--batch` sulla riga di comando, altrimenti il flag
 # vincerebbe sull'override (gli argomenti CLI sono letti dopo `apply_env_overrides`).
-SENZA_FLAG_BATCH = {"batch_up"}
+SENZA_FLAG_BATCH = {"batch_up", "fidelity", "fidelity_znorm"}
 
 
 def main() -> None:
@@ -91,6 +222,9 @@ def main() -> None:
     ap.add_argument("--variant", required=True, choices=sorted(VARIANTI))
     ap.add_argument("--arm", default="centralized")
     ap.add_argument("--tol", type=int, default=64)
+    ap.add_argument("--out-suffix", default="",
+                    help="Appended to the run directory name. Use it for TVQ_SMOKE=1 dry runs "
+                         "so their checkpoints can never be picked up by the real cell's resume.")
     a = ap.parse_args()
     s = f"ucr_{a.series}"
 
@@ -115,7 +249,7 @@ def main() -> None:
 
     cfgmod.apply_env_overrides = env_piu_variante
 
-    out = REPO / f"artifacts/runs/ucr{a.series}_abl_{a.variant}"
+    out = REPO / f"artifacts/runs/ucr{a.series}_abl_{a.variant}{a.out_suffix}"
     sys.argv = [
         "federated_eval.py",
         "--dataset", "ucr_split_w2p", "--cluster", s, "--arms", a.arm,

@@ -121,6 +121,7 @@ class Stage1VQVAE(nn.Module):
             ema_decay=cfg.quantizer.ema_decay,
             eps=cfg.quantizer.eps,
             threshold_ema_dead_code=cfg.quantizer.threshold_ema_dead_code,
+            kmeans_init=getattr(cfg.quantizer, "kmeans_init", True),
         )
         if cfg.quantizer.name == "residual_shared_codebook_per_channel_vq":
             q_kwargs["n_stages"] = int(cfg.quantizer.n_residual_stages)

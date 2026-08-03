@@ -864,7 +864,7 @@ def build_prior(name: str, **kwargs) -> nn.Module:
     if name == "maskgit":
         kwargs.pop("mask_mode", None)                    # 2D-only
         return MaskGITPrior(**kwargs)
-    if name in ("maskgit_2d_pos", "maskgit_3d_pos"):
+    if name in ("maskgit_2d_pos", "maskgit_3d_pos", "maskgit_upstream"):
         # focal_gamma / loss_weighting are implemented ONLY by MaskGITPrior. These two
         # variants have no code path that reads them, so accepting a non-default value
         # would silently measure nothing (a swept knob that reports a false null).
@@ -877,5 +877,14 @@ def build_prior(name: str, **kwargs) -> nn.Module:
             )
         if name == "maskgit_2d_pos":
             return MaskGITPrior2DPos(**kwargs)
+        if name == "maskgit_upstream":
+            # Upstream's x-transformers stack + flat 1-D positions. Subclasses
+            # MaskGITPrior3DPos, so masking / loss / scoring are the SAME code as
+            # every other cell and a difference in the result is attributable to
+            # the stack alone. Imported here, not at module scope, to keep the
+            # x-transformers dependency off the import path of runs that never
+            # select it.
+            from model.prior_upstream import MaskGITPriorUpstream
+            return MaskGITPriorUpstream(**kwargs)
         return MaskGITPrior3DPos(**kwargs)
     raise ValueError(f"Unknown prior: {name!r}")

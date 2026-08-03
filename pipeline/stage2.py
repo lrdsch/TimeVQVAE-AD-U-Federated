@@ -79,9 +79,17 @@ class Stage2System(nn.Module):
 
     def __init__(self, cfg: Config, stage1: Stage1VQVAE):
         super().__init__()
-        if cfg.prior.name != "maskgit_3d_pos":
+        # 'maskgit_upstream' is admitted because it SUBCLASSES MaskGITPrior3DPos:
+        # it keeps the (C, F, W) latent factorisation the scoring path reshapes
+        # against and the whole score_tokens_per_rate implementation, and swaps
+        # only the transformer stack and the positional indexing. The flat
+        # 'maskgit' / 'maskgit_2d_pos' priors stay rejected — they have no
+        # score_tokens_per_rate, so stage2 would fall back to a single-rate score
+        # and silently report a different quantity under the same column name.
+        if cfg.prior.name not in ("maskgit_3d_pos", "maskgit_upstream"):
             raise ValueError(
-                f"Target path requires prior.name = 'maskgit_3d_pos', got {cfg.prior.name!r}"
+                "Target path requires prior.name = 'maskgit_3d_pos' (or its "
+                f"upstream-stack subclass 'maskgit_upstream'), got {cfg.prior.name!r}"
             )
         self.cfg = cfg
         self.stage1 = stage1
@@ -105,6 +113,15 @@ class Stage2System(nn.Module):
             score_window_size_rates=cfg.prior.score_window_size_rates,
             mask_mode=cfg.prior.mask_mode,
         )
+        if cfg.prior.name == "maskgit_upstream":
+            # Only this prior reads them; passing them unconditionally would be
+            # swallowed by the other priors' `**_` and read as "configured".
+            prior_kwargs.update(
+                attn_dim_head=cfg.prior.attn_dim_head,
+                ff_mult=cfg.prior.ff_mult,
+                use_rmsnorm=cfg.prior.use_rmsnorm,
+                post_emb_norm=cfg.prior.post_emb_norm,
+            )
         self.prior = build_prior(cfg.prior.name, **prior_kwargs)
         # Batched-scoring budget (adaptive to batch size in score_tokens_per_rate).
         # Set as an instance attribute, NOT through build_prior: the prior __init__
