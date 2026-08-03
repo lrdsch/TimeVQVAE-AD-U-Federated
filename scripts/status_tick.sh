@@ -10,8 +10,13 @@
 # senza dover andare a guardare. Se emettesse molte righe il monitor verrebbe silenziato.
 set -u
 cd /home/leonardo/PhD/TimeVQVAE-AD-U-Federated
-PERIOD=${PERIOD:-900}
+# 300 s (era 900) dal 2026-08-02 19:30: la campagna e' in coda e gli eventi che contano
+# — un flusso che finisce, uno che si svuota — capitano piu' fitti che a meta' corsa.
+PERIOD=${PERIOD:-300}
 G4=leonardo@g4.etsisi.upm.es
+G2_SER="001 011 222 229"      # una serie, una macchina: queste stanno su g2
+G4_SER="014 043 083 086 170"  # queste su g4
+TAGS="v1 enc cb128 proto_count cb128base"   # 16+8+4+2+4 = 34 celle per serie
 
 # ⚠ CORRETTO 2026-08-02. Contava una cella come fatta appena esisteva UN report.json, cioe'
 # appena il primo dei 5 client aveva finito: il conteggio anticipava la realta' di 1-3 celle
@@ -20,15 +25,21 @@ celle() { find "artifacts/runs/$1" -name report.json 2>/dev/null \
           | xargs -r -n1 dirname | xargs -r -n1 dirname \
           | sort | uniq -c | awk '$1 >= 5' | wc -l; }
 
+# Celle ancora da fare su un insieme di serie.
+restanti() {
+  local r=0 s g d
+  for s in $1; do
+    d=0
+    for g in $TAGS; do d=$(( d + $(celle "ucr${s}_${g}") )); done
+    r=$(( r + 34 - d ))
+  done
+  echo "$r"
+}
+
 prev=-1
 while :; do
-  tot=0
-  for s in 001 011 222 229 014 043 083 086 170; do
-    # cb128base = `local` e `centralized` a K=128, aggiunti il 2026-08-02: senza di loro il
-    # blocco K=128 non aveva ne baseline ne tetto, e "la federazione batte local a K=128?"
-    # era una domanda senza risposta. 30 celle per serie diventano 34, il totale 270 -> 306.
-    for t in v1 enc cb128 proto_count cb128base; do tot=$(( tot + $(celle "ucr${s}_${t}") )); done
-  done
+  r2=$(restanti "$G2_SER"); r4=$(restanti "$G4_SER")
+  tot=$(( 306 - r2 - r4 ))
 
   # job PADRE su g2: i worker del dataloader ereditano la riga di comando, quindi un pgrep
   # nudo conta 400 processi invece di 12. Si filtra chi ha il padre fuori dall'insieme.
@@ -41,7 +52,6 @@ while :; do
   # il ppid: con ~500 worker su una macchina a load 22 e 776 utenti sono 500 fork, e andava in
   # timeout da sola. Il tick delle 11:44 ha riportato "g4 ? job" facendomi credere che il ponte
   # fosse caduto, mentre g4 stava benissimo. Una sonda che mente e' peggio di nessuna sonda.
-  # Ora: un solo `ps`, e il filtro sui padri lo fa awk in memoria.
   g4=$(timeout 45 ssh -o BatchMode=yes -o ConnectTimeout=10 "$G4" \
         'ps -eo pid,ppid,args -u leonardo 2>/dev/null | awk "/[f]ederated_ev/ {pid[\$1]=1; pp[\$1]=\$2}
              END {n=0; for (p in pid) if (!(pp[p] in pid)) n++; printf \"%d \", n}"
@@ -49,9 +59,7 @@ while :; do
      || g4="? ?"
   g4j=${g4%% *}; g4load=${g4##* }
 
-  # Collisione VERA = due processi con la STESSA out-dir, dataset, cluster E arm. Il rischio
-  # esiste perche' piu' flussi scrivono lo stesso artifacts/runs e launch.sh salta una cella
-  # solo se ne trova il report.json AL DISPATCH: una cella in corso non protegge.
+  # Collisione VERA = due processi con la STESSA out-dir, dataset, cluster E arm.
   # ⚠ La chiave DEVE includere out-dir: confrontando solo dataset+cluster+arm ho segnalato due
   # falsi allarmi (`ucr086_v1` a K=64 e `ucr086_cb128` a K=128 sono lo stesso arm sulla stessa
   # serie, ma sono l'ablazione, e scrivono in cartelle diverse).
@@ -62,16 +70,40 @@ while :; do
         | grep -oE '\-\-out-dir [^ ]+ --dataset [a-z0-9_]+ --cluster [a-z0-9_]+ --arms? [a-z0-9_,.]+' \
         | sort | uniq -d | wc -l)
 
+  # AVANZAMENTO INTERNO. ⚠ AGGIUNTO 2026-08-02 21:16. Il conteggio celle sta fermo per 20-30
+  # minuti di fila perche' una cella si chiude solo quando TUTTI e 5 i client hanno finito: il
+  # "+0" ripetuto non distingue un lavoro che avanza da uno morto, ed e' esattamente la
+  # confusione che oggi mi ha fatto gridare due volte a un blocco inesistente. Questi due numeri
+  # guardano DENTRO i job:
+  #   p4  = job al quinto client su cinque, cioe' a ridosso della chiusura di cella
+  #   4/5 = celle con 4 report.json su 5, che chiudono entro il tick successivo
+  # ⚠ I log stanno in logs/runs/, NON in artifacts/runs/ (li' non c'e' un solo .log): un find
+  # sul percorso sbagliato torna vuoto e si legge identico a "tutto fermo".
+  p4=$(for f in $(find logs/runs -name '*.log' -mmin -10 2>/dev/null); do
+         grep -oE '_p[0-9]+\] ep ' "$f" 2>/dev/null | tail -1; done | grep -c '_p4\]')
+  q45=$(find artifacts/runs -name report.json 2>/dev/null | xargs -r -n1 dirname \
+        | xargs -r -n1 dirname | sort | uniq -c | awk '$1 == 4' | wc -l)
+
   wd=$(tail -1 logs/bridge_watchdog.log 2>/dev/null | grep -oE '\-> .*' | cut -c4-)
   delta=$(( prev < 0 ? 0 : tot - prev )); prev=$tot
 
   alert=""
-  [ "${g4j:-0}" = "0" ] && alert=" ⚠ NESSUN JOB SU g4"
-  [ "${g2j:-0}" = "0" ] && alert="$alert ⚠ NESSUN JOB SU g2"
+  [ "${g4j:-0}" = "0" ] && [ "$r4" -gt 0 ] && alert=" ⚠ NESSUN JOB SU g4"
+  [ "${g2j:-0}" = "0" ] && [ "$r2" -gt 0 ] && alert="$alert ⚠ NESSUN JOB SU g2"
   [ "$wd" != "ok" ] && alert="$alert ⚠ PONTE: $wd"
   [ "${coll:-0}" -gt 0 ] 2>/dev/null && alert="$alert 🔴 COLLISIONE: $coll celle doppie"
 
-  printf 'TICK %s | celle %s/306 (+%s) | g2 %s job load %s | g4 %s job load %s | ponte %s%s\n' \
-    "$(date '+%H:%M')" "$tot" "$delta" "$g2j" "$g2load" "$g4j" "$g4load" "${wd:-?}" "$alert"
+  # Capacita' sprecata. ⚠ CORRETTO 2026-08-02 19:40, un tick dopo averlo introdotto: la prima
+  # versione confrontava i job di un nodo con le celle rimaste OVUNQUE, e ha gridato "g2 ha
+  # capacita' libera" mentre g2 aveva 4 celle in tutto e tutte e 4 in esecuzione. Il residuo
+  # era di g4, che g2 non puo' prendere (una serie, una macchina).
+  # Condizione giusta: celle rimaste SU QUEL NODO oltre a quelle gia' in esecuzione li'.
+  [ "$r4" -gt "${g4j:-0}" ] 2>/dev/null && [ "${g4j:-99}" -lt 12 ] 2>/dev/null \
+    && alert="$alert 💤 g4: $g4j job ma $r4 celle da fare"
+  [ "$r2" -gt "${g2j:-0}" ] 2>/dev/null && [ "${g2j:-99}" -lt 6 ] 2>/dev/null \
+    && alert="$alert 💤 g2: $g2j job ma $r2 celle da fare"
+
+  printf 'TICK %s | celle %s/306 (+%s) | in volo %s a p4, %s a 4/5 | g2 %s job load %s (%s da fare) | g4 %s job load %s (%s da fare) | ponte %s%s\n' \
+    "$(date '+%H:%M')" "$tot" "$delta" "${p4:-?}" "${q45:-?}" "$g2j" "$g2load" "$r2" "$g4j" "$g4load" "$r4" "${wd:-?}" "$alert"
   sleep "$PERIOD"
 done
