@@ -478,22 +478,49 @@ def _val_loss_stage1(client: ClientState, device: torch.device) -> float:
     return total / count if count else float("nan")
 
 
+def _val_seed(entity_id: str) -> int:
+    """Deterministic per-client seed for the FIXED val oracle — stable across rounds,
+    runs and processes (blake2b, not hash())."""
+    import hashlib
+    return int.from_bytes(hashlib.blake2b(f"s2val:{entity_id}".encode(),
+                                          digest_size=6).digest(), "big")
+
+
 @torch.no_grad()
-def _val_loss_prior(c: "Stage2ClientState", device: torch.device) -> float:
-    """Mean prior loss on this client's held-out `val`. Stage-1 is frozen here."""
+def _val_loss_prior(c: "Stage2ClientState", device: torch.device,
+                    val_mode: str = "legacy") -> float:
+    """Mean prior loss on this client's held-out `val`. Stage-1 is frozen here.
+
+    `val_mode`:
+      "legacy"  (default, every run on disk) — masks re-drawn from the GLOBAL RNG at every
+                eval, under `_amp()` autocast. Measured per-eval noise σ ≈ 0.006-0.018 nats
+                (random MaskGIT masks, model/prior.py `_mask_tokens`) against
+                min_delta=1e-4: selection among plateau rounds is jitter, and at small-τ
+                regimes the patience stop becomes a noise-record process.
+      "fixed"   — the SAME masks at every eval (fork_rng + per-client blake2b seed, so the
+                TRAINING RNG stream is untouched and trajectories stay byte-identical) and
+                fp32 forward (mirror of the stage-1 rule at `_val_loss`: the number drives
+                select_on_val, it must not depend on training precision).
+                Prerequisite for every small-τ run; opt-in via --fed-s2-val fixed."""
     loader = getattr(c.data, "val_loader", None)
     if loader is None:
         return float("nan")
     c.s2.stage1.eval(); c.s2.prior.eval()
-    total, count = 0.0, 0
-    for batch in loader:
-        batch["inputs"] = batch["inputs"].to(device, non_blocking=True)
-        with _amp():
-            tokens = c.s2.tokens_from_batch(batch)
-            c.s2._inform_latent_shape()
-            lv = float(c.s2.prior(tokens).loss.detach())
-        if math.isfinite(lv):
-            total += lv; count += 1
+    fixed = (val_mode == "fixed")
+    devs = [device] if device.type == "cuda" else []
+    rng_ctx = torch.random.fork_rng(devices=devs) if fixed else nullcontext()
+    with rng_ctx:
+        if fixed:
+            torch.manual_seed(_val_seed(c.entity_id))
+        total, count = 0.0, 0
+        for batch in loader:
+            batch["inputs"] = batch["inputs"].to(device, non_blocking=True)
+            with (nullcontext() if fixed else _amp()):
+                tokens = c.s2.tokens_from_batch(batch)
+                c.s2._inform_latent_shape()
+                lv = float(c.s2.prior(tokens).loss.detach())
+            if math.isfinite(lv):
+                total += lv; count += 1
     # NaN, never 0.0: a diverged client must not win the `val_loss < best_val` test at :658.
     return total / count if count else float("nan")
 
@@ -559,6 +586,79 @@ def _server_merge(counts, sums, eps, threshold, revive: bool, *,
             pick = live[torch.randint(len(live), (n_dead,))]
             weight[dead] = weight[pick] + 0.01 * torch.randn_like(weight[dead])
     return weight, N, M, n_dead
+
+
+@torch.no_grad()
+def _server_union_recluster(counts, sums, prev_cb: torch.Tensor, eps: float,
+                            threshold: float, lloyd_iters: int = 5):
+    """k-FED-style alternative to the pooled M-step (`_server_merge`), built for the
+    MINORITY-MOTIF failure measured on ucr_170 (2026-08-08): the pooled merge computes
+    e_j = Σ_i m_ij / Σ_i n_ij, so a rare motif seen well by ONE small client (p1, 10%)
+    is count-diluted into the majority's centroid and the merged codebook mis-encodes it.
+
+    Here instead: per-client M-step centroids (m_ij/n_ij, count-filtered) → UNION →
+    deterministic farthest-point seeding → `lloyd_iters` weighted Lloyd steps → the final
+    centers are SLOT-MATCHED to the previous codebook (greedy nearest, deterministic).
+    Farthest-point is the minority-preserving step: a rare-but-distinct client centroid is
+    far from everything and gets picked as a seed, where count-weighted anything ignores it.
+
+    Deterministic BY CONSTRUCTION: no RNG anywhere (seeding starts from the highest-count
+    centroid; ties in argmax/argmin resolve by index). No revival branch: unclaimed
+    capacity is reassigned by the reclustering itself; slots left unmatched when the union
+    is smaller than K keep the previous round's vector and broadcast N=0 (counted dead).
+
+    Returns (weight, N, M, n_dead) with the same contract as `_server_merge`:
+    N_k = summed member counts, M_k = weight_k · N_k (fixed point of M/smoothed(N))."""
+    K, D = prev_cb.shape
+    pts, wts = [], []
+    for n, m in zip(counts, sums):                       # one (K,), (K,D) pair per client
+        n = n.float().cpu(); m = m.float().cpu()
+        live = n >= float(threshold)                     # same liveness bar as the dead test
+        if live.any():
+            pts.append(m[live] / n[live].unsqueeze(1).clamp_min(eps))
+            wts.append(n[live])
+    if not pts:                                          # degenerate: nobody used anything
+        N = torch.zeros(K)
+        return prev_cb.clone(), N, prev_cb * N.unsqueeze(1), K
+    P = torch.cat(pts); W = torch.cat(wts)               # (U, D), (U,)
+    U = P.shape[0]
+    n_seeds = min(K, U)
+    # ── deterministic farthest-point seeding ────────────────────────────────────────
+    seed_idx = [int(W.argmax())]
+    d2 = ((P - P[seed_idx[0]]) ** 2).sum(1)
+    for _ in range(n_seeds - 1):
+        i = int(d2.argmax())
+        seed_idx.append(i)
+        d2 = torch.minimum(d2, ((P - P[i]) ** 2).sum(1))
+    C = P[seed_idx].clone()                              # (n_seeds, D)
+    # ── weighted Lloyd ──────────────────────────────────────────────────────────────
+    for _ in range(lloyd_iters):
+        assign = torch.cdist(P, C).argmin(1)
+        for k in range(n_seeds):
+            mask = assign == k
+            if mask.any():                               # empty cluster keeps its seed
+                C[k] = (P[mask] * W[mask].unsqueeze(1)).sum(0) / W[mask].sum().clamp_min(eps)
+    assign = torch.cdist(P, C).argmin(1)
+    Nc = torch.zeros(n_seeds)
+    for k in range(n_seeds):
+        Nc[k] = W[assign == k].sum()
+    # ── slot-match to the previous codebook (greedy nearest, deterministic) ─────────
+    # Functionally optional (the encoder sees vectors, not ids, and the prior trains only
+    # after the FINAL round) — but without it `cb_drift` telemetry reads as permutation
+    # noise and the resume re-seat asserts would compare unrelated slots.
+    cost = torch.cdist(C, prev_cb.float().cpu())         # (n_seeds, K)
+    weight = prev_cb.clone().float()
+    N = torch.zeros(K)
+    free_c = list(range(n_seeds)); free_s = list(range(K))
+    while free_c:
+        sub = cost[free_c][:, free_s]
+        flat = int(sub.argmin())
+        ci, si = free_c[flat // len(free_s)], free_s[flat % len(free_s)]
+        weight[si] = C[ci]; N[si] = Nc[ci]
+        free_c.remove(ci); free_s.remove(si)
+    M = weight * N.unsqueeze(1)
+    n_dead = int((N < threshold).sum())
+    return weight.to(prev_cb.dtype), N, M, n_dead
 
 
 @torch.no_grad()
@@ -1307,9 +1407,23 @@ def federated_stage1(
               f"{'ON' if select_on_val else 'OFF -> the stop will be DISABLED'})")
 
     cb_local = (merge == "local")
+    # `union_recluster` shares the ENTIRE client-side contract with `suffstat` (frozen
+    # broadcast codebook during local training, per-round (n, m) stats): the two differ
+    # only in the server step — pooled M-step vs k-FED union-recluster.
+    stats_merge = merge in ("suffstat", "union_recluster")
     clients = [_build_client(base_cfg, e, devices[i], anchor_weight=anchor_weight,
-                             collect_stats=(merge == "suffstat"), local_codebook=cb_local)
+                             collect_stats=stats_merge, local_codebook=cb_local)
                for i, e in enumerate(client_entities)]
+    if merge == "union_recluster":
+        print("[fed] codebook merge: UNION-RECLUSTER (k-FED style) — per-client M-step "
+              "centroids → count-filtered union → deterministic farthest-point seeding + "
+              "weighted Lloyd → slot-matched broadcast. Preserves MINORITY-client motifs "
+              "that the count-pooled M-step dilutes (the ucr_170 FP mechanism, 2026-08-08).")
+        if revive_dead:
+            print("[fed] NOTE union_recluster: `revive_dead` has NO revival branch here — "
+                  "unclaimed capacity is reassigned by the reclustering itself, and unmatched "
+                  "slots keep the previous vector with N=0 (counted dead, never resampled). "
+                  "The flag is inert by design, not silently dropped.")
 
     if merge == "fedavg" and len(clients[0].vqs) > 1:
         # REFUSE rather than half-federate. The suff-stat path loops `c.vqs` and merges every
@@ -1586,7 +1700,7 @@ def federated_stage1(
             rounds_done = int(resume_rounds_done)
             print(f"[fed] source round count DECLARED as {rounds_done} (--resume-rounds-done); "
                   f"the continuation is labelled from there.")
-        if merge == "suffstat":
+        if stats_merge:
             # Re-seat the server's view of the codebook from the restored clients, and check
             # they really do all hold the same one (they should: it was broadcast).
             global_cbs = [v.codebook.weight.detach().cpu().clone() for v in clients[0].vqs]
@@ -1646,7 +1760,7 @@ def federated_stage1(
                 z_ref = torch.stack(zs).mean(0)
             for c, d in zip(clients, devices):
                 c.z_ref = z_ref.to(d)
-        if merge == "suffstat":
+        if stats_merge:
             # Per STAGE: each Residual-VQ stage merges by its own independent k-FED M-step
             # (each has its own frozen broadcast codebook + round stats). A single-codebook
             # VQ has one stage → identical to the original single-codebook merge.
@@ -1670,10 +1784,16 @@ def federated_stage1(
                         f"client {c.entity_id} mutated stage-{s} codebook during local training!"
                     n, m = v.pull_round_stats()
                     counts[s].append(n.cpu()); sums[s].append(m.cpu())
-            merged = [_server_merge(counts[s], sums[s], eps, dead_thr, revive_dead,
-                                    ema_state=(server_ema[s] if server_ema is not None else None),
-                                    ema_decay=(cb_server_ema_decay if server_ema is not None else None))
-                      for s in range(n_stages)]
+            if merge == "suffstat":
+                merged = [_server_merge(counts[s], sums[s], eps, dead_thr, revive_dead,
+                                        ema_state=(server_ema[s] if server_ema is not None else None),
+                                        ema_decay=(cb_server_ema_decay if server_ema is not None else None))
+                          for s in range(n_stages)]
+            else:                                # union_recluster (no EMA, no revive: guarded above)
+                merged = [_server_union_recluster(counts[s], sums[s],
+                                                  prev_cb=cb_broadcasts[s],
+                                                  eps=eps, threshold=dead_thr)
+                          for s in range(n_stages)]
             global_cbs = [mg[0] for mg in merged]    # per-stage CPU master
             n_dead = sum(int(mg[3]) for mg in merged)
             for c, d in zip(clients, devices):        # carry the aggregated EMA state too
@@ -1757,7 +1877,8 @@ def federated_stage1(
             # no-op alias when already on CPU, and the caller must not hold client 0's live weight
             n_dead = int((N < dead_thr).sum())
         else:
-            raise ValueError(f"unknown merge {merge!r} (use 'suffstat', 'fedavg' or 'local')")
+            raise ValueError(f"unknown merge {merge!r} (use 'suffstat', 'union_recluster', "
+                             f"'fedavg' or 'local')")
 
         # CORRECTNESS: every client now holds the identical global codebook. Skipped for
         # merge='local', where divergent per-client dictionaries are the POINT.
@@ -1949,6 +2070,15 @@ class Stage2ClientState:
     # Optional warmup+cosine over the WHOLE run (see `enc_sched`). None = constant LR,
     # which is what every federated arm on disk was trained with.
     sched: "torch.optim.lr_scheduler.LambdaLR | None" = None
+    # ── FedProx on the SHARED prior body (port of the stage-1 encoder mechanics) ──
+    # μ=0 keeps every field inert: `prox_ref` is never set, the train loops build an
+    # empty pair list and the update path is bit-identical to plain FedAvg.
+    prox_mu: float = 0.0
+    prox_form: str = "decoupled"                  # "decoupled" | "loss" — see _prox_term
+    prox_ref: "dict[str, torch.Tensor] | None" = None   # w^t (start-of-round broadcast body), fp32
+    last_prox: float = float("nan")               # mean ‖w − w^t‖² per step
+    last_prox_ratio: float = float("nan")         # 'loss' form diagnostic (see _prox_grad_ratio)
+    last_prox_pull: float = float("nan")          # 'decoupled' form diagnostic (drift removed/round)
 
 
 def _prior_shared_keys(prior, local_prefixes: tuple[str, ...] = LOCAL_PRIOR_PREFIXES) -> list[str]:
@@ -1973,10 +2103,49 @@ def _build_stage2_client(s1c: ClientState, device: torch.device) -> Stage2Client
                              s2_loader=s2_loader)
 
 
+def _prox_pairs_prior(c: Stage2ClientState) -> list:
+    """(param, w^t) pairs for the prior, resolved ONCE per round (stage-1 twin at
+    _local_train_stage1: a per-step dict(named_parameters()) rebuild would dominate)."""
+    if not (c.prox_mu > 0 and c.prox_ref):
+        return []
+    params = dict(c.s2.prior.named_parameters())
+    return [(params[k], r) for k, r in c.prox_ref.items()]
+
+
+def _prox_step_prior(c: Stage2ClientState, prox_pairs: list, loss, prox_sum: float):
+    """The pre-backward half of the prox mechanics, shared by both prior train loops.
+    Returns (loss, prox_sum). Deliberately OUTSIDE `_amp()`: the distance is made of
+    low-order bits an fp16 reduction would lose (same rule as the stage-1 twin)."""
+    if prox_pairs and c.prox_form == "loss":
+        prox = _prox_term(prox_pairs)                       # ‖w − w^t‖²
+        loss = loss + 0.5 * c.prox_mu * prox
+        prox_sum += float(prox.detach())
+    elif prox_pairs:                                        # "decoupled": telemetry only here
+        with torch.no_grad():
+            prox_sum += float(_prox_term(prox_pairs))
+    return loss, prox_sum
+
+
+def _prox_finish_prior(c: Stage2ClientState, prox_sum: float, ratio_sum: float,
+                       ratio_n: int, steps: int, skipped: int) -> None:
+    """Per-round telemetry, one diagnostic PER FORM (they are NOT comparable — see the
+    stage-1 twin's comment block): 'loss' → prox_grad_ratio, 'decoupled' → prox_pull_frac."""
+    c.last_prox = prox_sum / steps if (steps and c.prox_mu > 0) else float("nan")
+    c.last_prox_ratio = (ratio_sum / ratio_n
+                         if (ratio_n and c.prox_form == "loss") else float("nan"))
+    if c.prox_mu > 0 and c.prox_form == "decoupled":
+        a = min(1.0, float(c.opt.param_groups[0]["lr"]) * c.prox_mu)
+        c.last_prox_pull = 1.0 - (1.0 - a) ** max(steps - skipped, 0)
+    else:
+        c.last_prox_pull = float("nan")
+
+
 def _local_train_prior(c: Stage2ClientState, n_epochs: int, device: torch.device) -> float:
     c.s2.stage1.eval()
     c.s2.prior.train()
     total, count = 0.0, 0
+    prox_pairs = _prox_pairs_prior(c)
+    prox_sum, ratio_sum, ratio_n, steps, skipped = 0.0, 0.0, 0, 0, 0
     for _ in range(n_epochs):
         for batch in c.s2_loader:              # batch_size_stage2, not the stage-1 loader
             batch["inputs"] = batch["inputs"].to(device, non_blocking=True)
@@ -1985,13 +2154,34 @@ def _local_train_prior(c: Stage2ClientState, n_epochs: int, device: torch.device
                 c.s2._inform_latent_shape()
                 out = c.s2.prior(tokens)
                 loss = out.loss
+            task = loss                        # reported loss stays the TASK loss (arm-comparable)
+            steps += 1
+            loss, prox_sum = _prox_step_prior(c, prox_pairs, loss, prox_sum)
             c.opt.zero_grad(set_to_none=True)
             c.scaler.scale(loss).backward()
+            if prox_pairs and c.prox_form == "loss":
+                # true-gradient diagnostic; `step` detects the unscaled state (stage-1 twin)
+                c.scaler.unscale_(c.opt)
+                rr = _prox_grad_ratio(prox_pairs, c.prox_mu, c.prox_form)
+                if math.isfinite(rr):
+                    ratio_sum += rr; ratio_n += 1
+            prev_scale = c.scaler.get_scale()
             c.scaler.step(c.opt)               # skipped iff grads overflowed under fp16
             c.scaler.update()
-            lv = float(loss.detach())
+            applied = c.scaler.get_scale() >= prev_scale
+            if not applied:
+                skipped += 1
+            if prox_pairs and c.prox_form == "decoupled" and applied:
+                # AdamW-style DECOUPLED proximal step: w ← w + lr·μ·(w^t − w), bypassing
+                # Adam's preconditioner (rationale in _prox_term's docstring).
+                with torch.no_grad():
+                    lr_t = c.opt.param_groups[0]["lr"]
+                    for p, ref in prox_pairs:
+                        p.add_(ref.to(p.dtype) - p, alpha=lr_t * c.prox_mu)
+            lv = float(task.detach())
             if math.isfinite(lv):              # an overflowed step must not poison the mean
                 total += lv; count += 1
+    _prox_finish_prior(c, prox_sum, ratio_sum, ratio_n, steps, skipped)
     # count == 0 ⇒ every step overflowed. `0.0` would read as a perfect loss.
     return total / count if count else float("nan")
 
@@ -2015,6 +2205,8 @@ def _local_train_prior_steps(c: Stage2ClientState, n_steps: int, device: torch.d
         gen = _cycle(c.s2_loader)              # batch_size_stage2: a "step" must mean the
         c._step_gen = gen                      # same amount of data as in every other arm
     total, count = 0.0, 0
+    prox_pairs = _prox_pairs_prior(c)
+    prox_sum, ratio_sum, ratio_n, steps, skipped = 0.0, 0.0, 0, 0, 0
     for _ in range(n_steps):
         batch = next(gen)
         batch["inputs"] = batch["inputs"].to(device, non_blocking=True)
@@ -2023,13 +2215,31 @@ def _local_train_prior_steps(c: Stage2ClientState, n_steps: int, device: torch.d
             c.s2._inform_latent_shape()
             out = c.s2.prior(tokens)
             loss = out.loss
+        task = loss
+        steps += 1
+        loss, prox_sum = _prox_step_prior(c, prox_pairs, loss, prox_sum)
         c.opt.zero_grad(set_to_none=True)
         c.scaler.scale(loss).backward()
+        if prox_pairs and c.prox_form == "loss":
+            c.scaler.unscale_(c.opt)
+            rr = _prox_grad_ratio(prox_pairs, c.prox_mu, c.prox_form)
+            if math.isfinite(rr):
+                ratio_sum += rr; ratio_n += 1
+        prev_scale = c.scaler.get_scale()
         c.scaler.step(c.opt)
         c.scaler.update()
-        lv = float(loss.detach())
+        applied = c.scaler.get_scale() >= prev_scale
+        if not applied:
+            skipped += 1
+        if prox_pairs and c.prox_form == "decoupled" and applied:
+            with torch.no_grad():
+                lr_t = c.opt.param_groups[0]["lr"]
+                for p, ref in prox_pairs:
+                    p.add_(ref.to(p.dtype) - p, alpha=lr_t * c.prox_mu)
+        lv = float(task.detach())
         if math.isfinite(lv):
             total += lv; count += 1
+    _prox_finish_prior(c, prox_sum, ratio_sum, ratio_n, steps, skipped)
     return total / count if count else float("nan")
 
 
@@ -2062,11 +2272,63 @@ def federated_stage2(
     tau_steps: int = 0,            # >0 ⇒ FedSGD: τ optimizer STEPS per round (not epochs). The R1 regime.
     server_opt: str = "sgd",       # "sgd" (plain/FedAvgM) | "fedadam" (adaptive server optimizer, FedOpt)
     server_lr: float = 0.01,       # FedAdam server step size η
+    server_b1: float = 0.9,        # FedAdam betas/eps — the old hardcoded values, now knobs.
+    server_b2: float = 0.99,       # NB no bias correction (Reddi et al. FedOpt Alg. 2): the
+    server_eps: float = 1e-3,      # transient |m|/√v peaks ≈2.13 at ~round 13, so the real
+                                   # per-coordinate cap is ~2·server_lr mid-run, not server_lr.
+    server_momentum_skip_round0: bool = False,
+                                   # FedAvgM: do NOT accumulate v at round 0. Measured on this
+                                   # repo's data: the round-0 average is DESTRUCTIVE
+                                   # (val(agg₀)=4.59/4.54 > ln(64)=4.16 uniform floor while the
+                                   # clients sit at ≤3.5) — heavy-ball with no damping would
+                                   # memorise exactly that direction, amplified up to 1/(1−β).
+    val_mode: str = "legacy",      # "legacy" | "fixed" — see _val_loss_prior. Fixed masks +
+                                   # fp32 val; prerequisite for small-τ regimes.
+    val_every: int = 1,            # evaluate val every K rounds (aggregation still every
+                                   # round). Patience counts EVAL rounds, not raw rounds:
+                                   # at small τ a per-round val dominates wall-clock and a
+                                   # round-counted patience collapses to a few optimizer
+                                   # steps of staleness. 1 = today's behaviour.
+    agg_penalty: bool = False,     # log, per eval round, the val of each client's OWN
+                                   # end-of-round body (pre-aggregation) next to the val of
+                                   # the broadcast average: penalty = val_post − val_pre.
+                                   # THE number that decides whether FedProx-on-the-prior has
+                                   # anything to fix (A2's histories suggest ~0). Costs one
+                                   # extra val sweep per eval round (~2% of an epoch-round).
+    snapshot_every: int = 0,       # >0: every K rounds save shared body + per-client local
+                                   # heads to `snapshot_dir` (s2_snap_rNNNN.pt), plus
+                                   # s2_last.pt before the best-round restore. Fuels the
+                                   # trajectory-detection probe (val↔AUPRC round by round)
+                                   # and the best-val-vs-last-round selection contrast.
+    snapshot_dir=None,             # where snapshots land (the arm scratch dir). None with
+                                   # snapshot_every>0 is refused: silent no-write is how
+                                   # instrumented runs turn out to be uninstrumented.
     patience_rounds: int = 0,      # 0 = off. >0 = stop once the cohort val loss has not
-                                   # improved for N rounds, so a generous --s2-rounds budget
-                                   # can be over-provisioned safely (same contract as
-                                   # federated_stage1). Needs select_on_val.
+                                   # improved for N consecutive EVALS (== rounds when
+                                   # val_every=1, the historical contract), so a generous
+                                   # --s2-rounds budget can be over-provisioned safely
+                                   # (same contract as federated_stage1). Needs select_on_val.
+    prior_prox_mu: float = 0.0,    # FedProx on the SHARED prior body: μ of the proximal
+                                   # anchor toward the start-of-round broadcast body (params
+                                   # only, local heads never anchored). 0 = off = plain
+                                   # FedAvg, bit-identical update path.
+    prior_prox_form: str = "decoupled",
+                                   # "decoupled" (§7 primary: post-step contraction, bypasses
+                                   # Adam's preconditioner) | "loss" (paper objective — under
+                                   # AdamW it can be a silent no-op; watch prox_grad_ratio).
 ) -> tuple[list[Stage2ClientState], list[dict], float]:
+    # FAIL-FAST, before any client is built: the two server optimizers are MUTUALLY
+    # EXCLUSIVE (if/elif in the round loop). Setting both used to make fedadam win in
+    # silence while the FedAvgM banner still printed — a log that lies about the mechanism.
+    if server_opt == "fedadam" and server_momentum > 0.0:
+        raise ValueError(f"server_opt='fedadam' and server_momentum={server_momentum} are "
+                         "mutually exclusive (the round loop is if/elif: fedadam would win "
+                         "silently and the FedAvgM banner would lie). Pick one.")
+    if snapshot_every > 0 and snapshot_dir is None:
+        raise ValueError("snapshot_every>0 with snapshot_dir=None: the snapshots would be "
+                         "silently dropped and the 'instrumented' run would not be.")
+    if prior_prox_form not in {"loss", "decoupled"}:
+        raise ValueError(f"unknown prior_prox_form {prior_prox_form!r} (use 'loss' or 'decoupled')")
     # CO-LOCATE with the frozen stage1 encoder: Stage2System wraps s1c.model, so the
     # prior MUST land on the same GPU or the forward throws a device mismatch.
     devices = [next(c.model.parameters()).device for c in stage1_clients]
@@ -2084,11 +2346,49 @@ def federated_stage2(
     for c in clients:
         c.s2.prior.load_state_dict(body0, strict=False)
 
+    # ── FedProx on the shared prior body ──────────────────────────────────────────
+    prox_param_names: list[str] = []
+    if prior_prox_mu > 0:
+        prox_param_names = _shared_param_names(clients[0].s2.prior, shared_keys)
+        if not prox_param_names:
+            # Same contract as federated_stage1's enc_param_names guard: a μ>0 run whose
+            # anchored set is empty is FedAvg wearing a FedProx label.
+            raise ValueError(
+                f"prior_prox_mu={prior_prox_mu} but the shared prior body contains 0 "
+                f"PARAMETERS ({len(shared_keys)} tensors) — the proximal anchor would not "
+                "exist. Use --fed-enc-prior partial|shared.")
+        for c in clients:
+            c.prox_mu, c.prox_form = float(prior_prox_mu), prior_prox_form
+        print(f"[fed-s2] FedProx-on-prior: mu={prior_prox_mu} form={prior_prox_form} — anchor "
+              f"w^t = start-of-round broadcast body ({len(prox_param_names)} param tensors of "
+              f"{len(shared_keys)} shared; local heads NOT anchored)")
+        if prior_prox_form == "decoupled":
+            lr0 = float(clients[0].opt.param_groups[0]["lr"])
+            a = min(1.0, lr0 * prior_prox_mu)
+            est_steps = (tau_steps if tau_steps > 0
+                         else local_epochs * max(1, len(clients[0].s2_loader)))
+            print(f"[fed-s2] decoupled contraction (1−lr·mu)={1 - a:.6f}/step ⇒ estimated "
+                  f"prox_pull_frac ≈ {1 - (1 - a) ** est_steps:.1%} of the round drift removed "
+                  f"(~{est_steps} steps/round); the measured value is history.prox_pull_frac.")
+        else:
+            print("[fed-s2] ⚠ loss-form prox under AdamW: the prox gradient goes through the "
+                  "preconditioner and can be a silent no-op — prox_grad_ratio ≥ 1e-2 on LATE "
+                  "rounds is the pre-registered evidence that μ bites.")
+
     # FedAvgM server state: momentum on the pseudo-gradient (x_t - aggregate). beta=0 -> plain FedAvg.
+    # SIGN CONVENTION (do not "fix" to match FedAdam): here δ = x − agg (DESCENT form,
+    # Hsu et al. 2019, heavy-ball WITHOUT (1−β) damping ⇒ steady-state step up to 1/(1−β)×δ);
+    # FedAdam below uses Δ = agg − x (ASCENT toward the clients). Both broadcast x, not agg.
     _srv_x = {k: body0[k].float().cpu().clone() for k in shared_keys} if server_momentum > 0.0 else None
     _srv_v = {k: torch.zeros_like(v) for k, v in _srv_x.items()} if server_momentum > 0.0 else None
     if server_momentum > 0.0:
-        print(f"[fed-s2] FedAvgM server momentum={server_momentum}")
+        print(f"[fed-s2] FedAvgM server momentum={server_momentum}"
+              + (" (round-0 accumulation SKIPPED)" if server_momentum_skip_round0 else ""))
+        if server_momentum > 0.5:
+            print(f"[fed-s2] ⚠ FedAvgM β={server_momentum} with FULL local epochs: undamped "
+                  f"heavy-ball amplifies the pseudo-gradient up to {1/(1-server_momentum):.0f}×, "
+                  "and the round-0 average is measured DESTRUCTIVE on this repo's data — "
+                  "consider β≤0.3 and/or server_momentum_skip_round0.")
 
     # FedAdam (FedOpt) server state: an Adam optimizer over the pseudo-gradient
     # Δ = (avg client body) − x. Recommended companion to small-τ FedSGD — the
@@ -2100,12 +2400,23 @@ def federated_stage2(
             "x": {k: body0[k].float().cpu().clone() for k in shared_keys},
             "m": {k: torch.zeros_like(body0[k].float().cpu()) for k in shared_keys},
             "v": {k: torch.zeros_like(body0[k].float().cpu()) for k in shared_keys},
-            "b1": 0.9, "b2": 0.99, "eps": 1e-3, "lr": float(server_lr),
+            "b1": float(server_b1), "b2": float(server_b2), "eps": float(server_eps),
+            "lr": float(server_lr),
         }
-        print(f"[fed-s2] FedAdam server lr={server_lr} b1=0.9 b2=0.99 eps=1e-3")
+        print(f"[fed-s2] FedAdam server lr={server_lr} b1={server_b1} b2={server_b2} "
+              f"eps={server_eps} (no bias correction; per-coordinate step caps ~2·lr mid-run)")
     if tau_steps > 0:
         print(f"[fed-s2] FedSGD regime: tau_steps={tau_steps} step(s)/round × {rounds} round(s) "
               f"= {tau_steps * rounds} total local steps/client")
+        print(f"[fed-s2] NB τ regime: --local-epochs is IGNORED; the LOCAL heads "
+              f"({', '.join(local_prefixes) or 'none'}) also take exactly {tau_steps} Adam "
+              f"step(s)/round — head capacity is coupled to the round count.")
+    if val_mode == "fixed":
+        print("[fed-s2] val oracle FIXED: frozen per-client masks + fp32 (selection noise "
+              "σ→0; legacy runs carried σ≈0.006-0.018 nats of mask-resampling noise)")
+    if val_every > 1:
+        print(f"[fed-s2] val cadence: every {val_every} rounds; patience counts EVALS "
+              f"(effective step-patience = patience × val_every × steps/round)")
 
     history: list[dict] = []
     best_val, best_round, best_states = float("inf"), None, None
@@ -2120,7 +2431,18 @@ def federated_stage2(
         print(f"[fed-s2] convergence stop ARMED: patience={patience_rounds} rounds, "
               f"min_delta={min_delta:g} (needs select_on_val: "
               f"{'ON' if select_on_val else 'OFF -> the stop will be DISABLED'})")
+    # Local (non-shared) keys, for the snapshots: the heads that never cross the network.
+    local_keys = [k for k in clients[0].s2.prior.state_dict().keys() if k not in set(shared_keys)]
     for r in range(rounds):
+        # Eval cadence decided UP FRONT: val_pre (below) and val_post must share it, or the
+        # aggregation penalty would compare numbers from different rounds.
+        do_val = select_on_val and (r % max(1, val_every) == 0 or r == rounds - 1)
+        if prior_prox_mu > 0:
+            # w^t: every client holds the IDENTICAL broadcast body here (asserted at the end
+            # of the previous round), so a per-client snapshot IS the global anchor — taken
+            # per client so each anchor lives on its own device.
+            for c in clients:
+                c.prox_ref = _snapshot_prox_ref(c.s2.prior, prox_param_names)
         sds, weights, losses = [], [], []
         for ci, (c, d) in enumerate(zip(clients, devices)):
             torch.manual_seed(_round_seed(seed, r, ci, stage=2))
@@ -2128,6 +2450,10 @@ def federated_stage2(
                           else _local_train_prior(c, local_epochs, d))
             sds.append({k: c.s2.prior.state_dict()[k].detach().clone() for k in shared_keys})
             weights.append(c.n_windows)
+        # PRE-aggregation val: each client scored with its OWN end-of-round drifted body
+        # (the models still hold it — this must run BEFORE the broadcast overwrites them).
+        val_pre = _mean_finite([_val_loss_prior(c, d, val_mode) for c, d in zip(clients, devices)]) \
+            if (agg_penalty and do_val) else float("nan")
         agg = _fedavg_shared(sds, weights, shared_keys)
         if server_opt == "fedadam":                     # FedOpt: Adam over Δ = agg − x
             for k in shared_keys:
@@ -2137,11 +2463,18 @@ def federated_stage2(
                 _fa["x"][k] = _fa["x"][k] + _fa["lr"] * _fa["m"][k] / (_fa["v"][k].sqrt() + _fa["eps"])
                 agg[k] = _fa["x"][k].to(agg[k].dtype)
         elif server_momentum > 0.0:                     # FedAvgM: v = beta*v + (x - agg); x = x - v
-            for k in shared_keys:
-                delta = _srv_x[k] - agg[k].float().cpu()
-                _srv_v[k] = server_momentum * _srv_v[k] + delta
-                _srv_x[k] = _srv_x[k] - _srv_v[k]
-                agg[k] = _srv_x[k].to(agg[k].dtype)
+            if r == 0 and server_momentum_skip_round0:
+                # Install the plain average, accumulate nothing: the round-0 pseudo-gradient
+                # points at a measured-destructive average (see the signature comment) and
+                # undamped heavy-ball would replay it for ~1/(1−β) rounds.
+                for k in shared_keys:
+                    _srv_x[k] = agg[k].float().cpu()
+            else:
+                for k in shared_keys:
+                    delta = _srv_x[k] - agg[k].float().cpu()
+                    _srv_v[k] = server_momentum * _srv_v[k] + delta
+                    _srv_x[k] = _srv_x[k] - _srv_v[k]
+                    agg[k] = _srv_x[k].to(agg[k].dtype)
         for c in clients:
             c.s2.prior.load_state_dict(agg, strict=False)
         # CORRECTNESS: every client now holds the identical shared body.
@@ -2156,11 +2489,40 @@ def federated_stage2(
         # Scored AFTER the broadcast, so `val_loss` belongs to the aggregated body
         # paired with each client's own local head — which is exactly the artifact
         # this arm ships. Averaged uniformly over clients: one body per cluster.
-        val_loss = _mean_finite([_val_loss_prior(c, d) for c, d in zip(clients, devices)]) \
-            if select_on_val else float("nan")
-        history.append({"round": r, "mean_loss": sum(losses) / len(losses), "val_loss": val_loss})
-        print(f"[fed-s2] round {r}: prior_loss={history[-1]['mean_loss']:.4f}"
-              + (f" val={val_loss:.4f}" if math.isfinite(val_loss) else ""))
+        # `val_every`: non-eval rounds carry val=NaN and do NOT touch patience — at small τ
+        # a per-round val dominates wall-clock and turns the stop into a noise-record process.
+        val_loss = _mean_finite([_val_loss_prior(c, d, val_mode) for c, d in zip(clients, devices)]) \
+            if do_val else float("nan")
+        row = {"round": r, "mean_loss": sum(losses) / len(losses), "val_loss": val_loss}
+        if agg_penalty and math.isfinite(val_pre):
+            # penalty > 0 ⇒ the broadcast average scores WORSE than the clients' own drifted
+            # bodies — the pathology FedProx-on-the-prior would exist to fix.
+            row["val_pre_agg"] = val_pre
+            row["agg_penalty"] = (val_loss - val_pre) if math.isfinite(val_loss) else float("nan")
+        if prior_prox_mu > 0:
+            row["prox_dist"] = _mean_finite([c.last_prox for c in clients])
+            if prior_prox_form == "decoupled":
+                row["prox_pull_frac"] = _mean_finite([c.last_prox_pull for c in clients])
+            else:
+                row["prox_grad_ratio"] = _mean_finite([c.last_prox_ratio for c in clients])
+        history.append(row)
+        print(f"[fed-s2] round {r}: prior_loss={row['mean_loss']:.4f}"
+              + (f" val={val_loss:.4f}" if math.isfinite(val_loss) else "")
+              + (f" val_pre={val_pre:.4f} agg_pen={row.get('agg_penalty', float('nan')):+.4f}"
+                 if agg_penalty and math.isfinite(val_pre) else "")
+              + ((f" prox_dist={row['prox_dist']:.3e}"
+                  + (f" pull={row['prox_pull_frac']:.1%}" if prior_prox_form == "decoupled"
+                     else f" ratio={row['prox_grad_ratio']:.3g}"))
+                 if prior_prox_mu > 0 else ""))
+        # ── trajectory snapshots (shared body once + per-client heads) ────────────────
+        if snapshot_every > 0 and (r % snapshot_every == 0 or r == rounds - 1):
+            snap = {"round": r, "val_loss": val_loss,
+                    "body": {k: agg[k].detach().cpu() for k in shared_keys},
+                    "heads": [{k: c.s2.prior.state_dict()[k].detach().cpu() for k in local_keys}
+                              for c in clients],
+                    "entities": [c.entity_id for c in clients]}
+            os.makedirs(str(snapshot_dir), exist_ok=True)
+            torch.save(snap, os.path.join(str(snapshot_dir), f"s2_snap_r{r:04d}.pt"))
 
         # Snapshot the FULL prior state (shared body + each client's local head): the
         # head co-adapts to the body, so rolling the body back to round k while leaving
@@ -2178,7 +2540,10 @@ def federated_stage2(
                       f"round {r} of {rounds - 1}.")
                 history[-1]["converged_stop"] = True
                 break
-        elif patience_rounds > 0:
+        elif patience_rounds > 0 and do_val:
+            # `do_val` guard: with val_every>1 the skipped rounds carry val=NaN by DESIGN —
+            # warning there would print thousands of false alarms in a τ regime. This branch
+            # now fires only when an eval was attempted and still came back non-finite.
             print("[fed-s2] patience_rounds set but val is not finite — is select_on_val on? "
                   "Convergence stop DISABLED for this run.")
 
@@ -2204,6 +2569,15 @@ def federated_stage2(
         print("!" * 78 + "\n", flush=True)
         history[-1]["truncated"] = True
 
+    # The LAST-round state, saved BEFORE the best-round restore: the free selection-rule
+    # contrast (best-on-val vs kept-last — on ucr_170 the val-argmin itself is the suspect:
+    # es 0.060 vs kept-last 0.517). Only when snapshots are on: it is instrumentation.
+    if snapshot_every > 0:
+        torch.save({"round": len(history) - 1, "val_loss": history[-1]["val_loss"],
+                    "states": [copy.deepcopy(c.s2.prior.state_dict()) for c in clients],
+                    "entities": [c.entity_id for c in clients],
+                    "best_round": best_round, "best_val": best_val},
+                   os.path.join(str(snapshot_dir), "s2_last.pt"))
     if best_states is not None and best_round != rounds - 1:
         for c, sd in zip(clients, best_states):
             c.s2.prior.load_state_dict(sd)

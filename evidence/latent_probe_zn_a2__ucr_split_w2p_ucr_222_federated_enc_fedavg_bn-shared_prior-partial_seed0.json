@@ -1,0 +1,679 @@
+{
+  "cluster": "ucr_222",
+  "arm": "federated_enc_fedavg_bn-shared_prior-partial",
+  "seed": 0,
+  "tag": "zn_a2",
+  "dataset": "ucr_split_w2p",
+  "run_dir": "/home/leonardo/PhD/TimeVQVAE-AD-U-Federated/artifacts/runs/zn_a2",
+  "clients": [
+    "ucr_222_p0",
+    "ucr_222_p1",
+    "ucr_222_p2",
+    "ucr_222_p3",
+    "ucr_222_p4"
+  ],
+  "config": {
+    "window_length": 202,
+    "window_normalization": "zscore",
+    "codebook_size": 64,
+    "prior": "maskgit_3d_pos",
+    "scaling": "per_entity_standard"
+  },
+  "D0": {
+    "reference": "ucr_222_p0",
+    "max_abs_diff_per_client": {
+      "ucr_222_p1": 1.430511474609375e-06,
+      "ucr_222_p2": 9.5367431640625e-07,
+      "ucr_222_p3": 9.5367431640625e-07,
+      "ucr_222_p4": 1.430511474609375e-06
+    },
+    "worst": 1.430511474609375e-06,
+    "inputs_identical": true,
+    "verdict": "PULITO \u2014 i 5 client ricevono finestre identiche: ogni disaccordo di token in D1 \u00e8 attribuibile SOLO all'encoder."
+  },
+  "codebook_max_delta_across_clients": 0.0,
+  "D1": {
+    "codebook_max_delta": 0.0,
+    "cross_client_interpretable": true,
+    "codebook_usage": {
+      "ucr_222_p0": {
+        "active_codes_corpus": 64,
+        "perplexity_corpus": 19.647196999336014,
+        "top1_share": 0.17428184281842818,
+        "tokens_per_window": 75,
+        "distinct_codes_per_window_mean": 22.15909090909091,
+        "distinct_codes_per_window_median": 22.0,
+        "distinct_codes_per_window_p10": 19.0,
+        "distinct_codes_per_window_p90": 26.0,
+        "effective_codes_per_window_median": 14.658737549313189
+      },
+      "ucr_222_p1": {
+        "active_codes_corpus": 64,
+        "perplexity_corpus": 19.647196999336014,
+        "top1_share": 0.17428184281842818,
+        "tokens_per_window": 75,
+        "distinct_codes_per_window_mean": 22.15909090909091,
+        "distinct_codes_per_window_median": 22.0,
+        "distinct_codes_per_window_p10": 19.0,
+        "distinct_codes_per_window_p90": 26.0,
+        "effective_codes_per_window_median": 14.658737549313189
+      },
+      "ucr_222_p2": {
+        "active_codes_corpus": 64,
+        "perplexity_corpus": 19.647196999336014,
+        "top1_share": 0.17428184281842818,
+        "tokens_per_window": 75,
+        "distinct_codes_per_window_mean": 22.15909090909091,
+        "distinct_codes_per_window_median": 22.0,
+        "distinct_codes_per_window_p10": 19.0,
+        "distinct_codes_per_window_p90": 26.0,
+        "effective_codes_per_window_median": 14.658737549313189
+      },
+      "ucr_222_p3": {
+        "active_codes_corpus": 64,
+        "perplexity_corpus": 19.647196999336014,
+        "top1_share": 0.17428184281842818,
+        "tokens_per_window": 75,
+        "distinct_codes_per_window_mean": 22.15909090909091,
+        "distinct_codes_per_window_median": 22.0,
+        "distinct_codes_per_window_p10": 19.0,
+        "distinct_codes_per_window_p90": 26.0,
+        "effective_codes_per_window_median": 14.658737549313189
+      },
+      "ucr_222_p4": {
+        "active_codes_corpus": 64,
+        "perplexity_corpus": 19.647196999336014,
+        "top1_share": 0.17428184281842818,
+        "tokens_per_window": 75,
+        "distinct_codes_per_window_mean": 22.15909090909091,
+        "distinct_codes_per_window_median": 22.0,
+        "distinct_codes_per_window_p10": 19.0,
+        "distinct_codes_per_window_p90": 26.0,
+        "effective_codes_per_window_median": 14.658737549313189
+      }
+    },
+    "median_distinct_codes_per_window": 22.0,
+    "pairs": {
+      "ucr_222_p0|ucr_222_p1": {
+        "agree_raw": 1.0,
+        "p_chance": 0.0781724541456483,
+        "kappa": 1.0,
+        "agree_hungarian_fit": 1.0,
+        "agree_hungarian_heldout": 1.0,
+        "support_jaccard": 1.0,
+        "support_intersection": 64,
+        "js_marginal": 0.0,
+        "agree_by_freq": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "ucr_222_p0|ucr_222_p2": {
+        "agree_raw": 1.0,
+        "p_chance": 0.0781724541456483,
+        "kappa": 1.0,
+        "agree_hungarian_fit": 1.0,
+        "agree_hungarian_heldout": 1.0,
+        "support_jaccard": 1.0,
+        "support_intersection": 64,
+        "js_marginal": 0.0,
+        "agree_by_freq": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "ucr_222_p0|ucr_222_p3": {
+        "agree_raw": 1.0,
+        "p_chance": 0.0781724541456483,
+        "kappa": 1.0,
+        "agree_hungarian_fit": 1.0,
+        "agree_hungarian_heldout": 1.0,
+        "support_jaccard": 1.0,
+        "support_intersection": 64,
+        "js_marginal": 0.0,
+        "agree_by_freq": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "ucr_222_p0|ucr_222_p4": {
+        "agree_raw": 1.0,
+        "p_chance": 0.0781724541456483,
+        "kappa": 1.0,
+        "agree_hungarian_fit": 1.0,
+        "agree_hungarian_heldout": 1.0,
+        "support_jaccard": 1.0,
+        "support_intersection": 64,
+        "js_marginal": 0.0,
+        "agree_by_freq": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "ucr_222_p1|ucr_222_p2": {
+        "agree_raw": 1.0,
+        "p_chance": 0.0781724541456483,
+        "kappa": 1.0,
+        "agree_hungarian_fit": 1.0,
+        "agree_hungarian_heldout": 1.0,
+        "support_jaccard": 1.0,
+        "support_intersection": 64,
+        "js_marginal": 0.0,
+        "agree_by_freq": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "ucr_222_p1|ucr_222_p3": {
+        "agree_raw": 1.0,
+        "p_chance": 0.0781724541456483,
+        "kappa": 1.0,
+        "agree_hungarian_fit": 1.0,
+        "agree_hungarian_heldout": 1.0,
+        "support_jaccard": 1.0,
+        "support_intersection": 64,
+        "js_marginal": 0.0,
+        "agree_by_freq": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "ucr_222_p1|ucr_222_p4": {
+        "agree_raw": 1.0,
+        "p_chance": 0.0781724541456483,
+        "kappa": 1.0,
+        "agree_hungarian_fit": 1.0,
+        "agree_hungarian_heldout": 1.0,
+        "support_jaccard": 1.0,
+        "support_intersection": 64,
+        "js_marginal": 0.0,
+        "agree_by_freq": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "ucr_222_p2|ucr_222_p3": {
+        "agree_raw": 1.0,
+        "p_chance": 0.0781724541456483,
+        "kappa": 1.0,
+        "agree_hungarian_fit": 1.0,
+        "agree_hungarian_heldout": 1.0,
+        "support_jaccard": 1.0,
+        "support_intersection": 64,
+        "js_marginal": 0.0,
+        "agree_by_freq": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "ucr_222_p2|ucr_222_p4": {
+        "agree_raw": 1.0,
+        "p_chance": 0.0781724541456483,
+        "kappa": 1.0,
+        "agree_hungarian_fit": 1.0,
+        "agree_hungarian_heldout": 1.0,
+        "support_jaccard": 1.0,
+        "support_intersection": 64,
+        "js_marginal": 0.0,
+        "agree_by_freq": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "ucr_222_p3|ucr_222_p4": {
+        "agree_raw": 1.0,
+        "p_chance": 0.0781724541456483,
+        "kappa": 1.0,
+        "agree_hungarian_fit": 1.0,
+        "agree_hungarian_heldout": 1.0,
+        "support_jaccard": 1.0,
+        "support_intersection": 64,
+        "js_marginal": 0.0,
+        "agree_by_freq": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "mean_kappa": 1.0,
+    "mean_agree_raw": 1.0,
+    "mean_agree_hungarian_heldout": 1.0,
+    "mean_support_jaccard": 1.0,
+    "mean_hungarian_gain": 0.0,
+    "tie_margin": {
+      "median": 0.7534458041191101,
+      "frac_below_0.01": 0.0061246612466124666,
+      "frac_below_0.05": 0.030682434097068244
+    },
+    "verdict": "ENCODER CONCORDANTI (kappa=1.000, accordo grezzo 1.000). La premessa 'latenti diversi' \u00e8 falsa in questo cluster: il gauge fixing non serve."
+  },
+  "D4": {
+    "per_client": {
+      "ucr_222_p0": {
+        "nll_random_trainmask": 0.8519202115857923,
+        "nll_column_scoremask_per_rate": [
+          0.5184746980667114,
+          0.882301926612854,
+          1.4160089492797852
+        ],
+        "rates": [
+          0.1,
+          0.3,
+          0.5
+        ],
+        "kernel_sizes": [
+          3,
+          7,
+          13
+        ],
+        "masked_frac_score": [
+          0.12,
+          0.28,
+          0.52
+        ],
+        "ratio_worst_rate": 1.6621379913548235
+      },
+      "ucr_222_p1": {
+        "nll_random_trainmask": 0.8999658402107857,
+        "nll_column_scoremask_per_rate": [
+          0.5550925731658936,
+          0.9216700792312622,
+          1.466139554977417
+        ],
+        "rates": [
+          0.1,
+          0.3,
+          0.5
+        ],
+        "kernel_sizes": [
+          3,
+          7,
+          13
+        ],
+        "masked_frac_score": [
+          0.12,
+          0.28,
+          0.52
+        ],
+        "ratio_worst_rate": 1.6291057832084213
+      },
+      "ucr_222_p2": {
+        "nll_random_trainmask": 0.8516762104549923,
+        "nll_column_scoremask_per_rate": [
+          0.5183901786804199,
+          0.8797911405563354,
+          1.4152195453643799
+        ],
+        "rates": [
+          0.1,
+          0.3,
+          0.5
+        ],
+        "kernel_sizes": [
+          3,
+          7,
+          13
+        ],
+        "masked_frac_score": [
+          0.12,
+          0.28,
+          0.52
+        ],
+        "ratio_worst_rate": 1.6616873032162363
+      },
+      "ucr_222_p3": {
+        "nll_random_trainmask": 0.8508684142344707,
+        "nll_column_scoremask_per_rate": [
+          0.5170923471450806,
+          0.8791916966438293,
+          1.4163880348205566
+        ],
+        "rates": [
+          0.1,
+          0.3,
+          0.5
+        ],
+        "kernel_sizes": [
+          3,
+          7,
+          13
+        ],
+        "masked_frac_score": [
+          0.12,
+          0.28,
+          0.52
+        ],
+        "ratio_worst_rate": 1.6646381639338275
+      },
+      "ucr_222_p4": {
+        "nll_random_trainmask": 0.854446505263045,
+        "nll_column_scoremask_per_rate": [
+          0.5209231376647949,
+          0.8823120594024658,
+          1.4201523065567017
+        ],
+        "rates": [
+          0.1,
+          0.3,
+          0.5
+        ],
+        "kernel_sizes": [
+          3,
+          7,
+          13
+        ],
+        "masked_frac_score": [
+          0.12,
+          0.28,
+          0.52
+        ],
+        "ratio_worst_rate": 1.6620728129954745
+      }
+    },
+    "mean_ratio": 1.6559284109417565,
+    "verdict": "MISMATCH FORTE (\u00d71.66). Il prior \u00e8 valutato molto fuori dal regime in cui \u00e8 addestrato: l'ablazione mask_mode=column va fatta PRIMA di qualunque lavoro sulla federazione \u2014 sposterebbe ogni cella."
+  },
+  "D2": {
+    "pairs": {
+      "prior=ucr_222_p0|tok=ucr_222_p1": {
+        "spearman_field": 1.0,
+        "spearman_timestep": 1.0,
+        "argmax_shift_samples": 0,
+        "top1_hit_own": false,
+        "top1_hit_foreign": false,
+        "top1_flipped": false
+      },
+      "prior=ucr_222_p0|tok=ucr_222_p2": {
+        "spearman_field": 1.0,
+        "spearman_timestep": 1.0,
+        "argmax_shift_samples": 0,
+        "top1_hit_own": false,
+        "top1_hit_foreign": false,
+        "top1_flipped": false
+      },
+      "prior=ucr_222_p0|tok=ucr_222_p3": {
+        "spearman_field": 1.0,
+        "spearman_timestep": 1.0,
+        "argmax_shift_samples": 0,
+        "top1_hit_own": false,
+        "top1_hit_foreign": false,
+        "top1_flipped": false
+      },
+      "prior=ucr_222_p0|tok=ucr_222_p4": {
+        "spearman_field": 1.0,
+        "spearman_timestep": 1.0,
+        "argmax_shift_samples": 0,
+        "top1_hit_own": false,
+        "top1_hit_foreign": false,
+        "top1_flipped": false
+      },
+      "prior=ucr_222_p1|tok=ucr_222_p0": {
+        "spearman_field": 1.0,
+        "spearman_timestep": 1.0,
+        "argmax_shift_samples": 0,
+        "top1_hit_own": false,
+        "top1_hit_foreign": false,
+        "top1_flipped": false
+      },
+      "prior=ucr_222_p1|tok=ucr_222_p2": {
+        "spearman_field": 1.0,
+        "spearman_timestep": 1.0,
+        "argmax_shift_samples": 0,
+        "top1_hit_own": false,
+        "top1_hit_foreign": false,
+        "top1_flipped": false
+      },
+      "prior=ucr_222_p1|tok=ucr_222_p3": {
+        "spearman_field": 1.0,
+        "spearman_timestep": 1.0,
+        "argmax_shift_samples": 0,
+        "top1_hit_own": false,
+        "top1_hit_foreign": false,
+        "top1_flipped": false
+      },
+      "prior=ucr_222_p1|tok=ucr_222_p4": {
+        "spearman_field": 1.0,
+        "spearman_timestep": 1.0,
+        "argmax_shift_samples": 0,
+        "top1_hit_own": false,
+        "top1_hit_foreign": false,
+        "top1_flipped": false
+      },
+      "prior=ucr_222_p2|tok=ucr_222_p0": {
+        "spearman_field": 1.0,
+        "spearman_timestep": 1.0,
+        "argmax_shift_samples": 0,
+        "top1_hit_own": false,
+        "top1_hit_foreign": false,
+        "top1_flipped": false
+      },
+      "prior=ucr_222_p2|tok=ucr_222_p1": {
+        "spearman_field": 1.0,
+        "spearman_timestep": 1.0,
+        "argmax_shift_samples": 0,
+        "top1_hit_own": false,
+        "top1_hit_foreign": false,
+        "top1_flipped": false
+      },
+      "prior=ucr_222_p2|tok=ucr_222_p3": {
+        "spearman_field": 1.0,
+        "spearman_timestep": 1.0,
+        "argmax_shift_samples": 0,
+        "top1_hit_own": false,
+        "top1_hit_foreign": false,
+        "top1_flipped": false
+      },
+      "prior=ucr_222_p2|tok=ucr_222_p4": {
+        "spearman_field": 1.0,
+        "spearman_timestep": 1.0,
+        "argmax_shift_samples": 0,
+        "top1_hit_own": false,
+        "top1_hit_foreign": false,
+        "top1_flipped": false
+      },
+      "prior=ucr_222_p3|tok=ucr_222_p0": {
+        "spearman_field": 1.0,
+        "spearman_timestep": 1.0,
+        "argmax_shift_samples": 0,
+        "top1_hit_own": false,
+        "top1_hit_foreign": false,
+        "top1_flipped": false
+      },
+      "prior=ucr_222_p3|tok=ucr_222_p1": {
+        "spearman_field": 1.0,
+        "spearman_timestep": 1.0,
+        "argmax_shift_samples": 0,
+        "top1_hit_own": false,
+        "top1_hit_foreign": false,
+        "top1_flipped": false
+      },
+      "prior=ucr_222_p3|tok=ucr_222_p2": {
+        "spearman_field": 1.0,
+        "spearman_timestep": 1.0,
+        "argmax_shift_samples": 0,
+        "top1_hit_own": false,
+        "top1_hit_foreign": false,
+        "top1_flipped": false
+      },
+      "prior=ucr_222_p3|tok=ucr_222_p4": {
+        "spearman_field": 1.0,
+        "spearman_timestep": 1.0,
+        "argmax_shift_samples": 0,
+        "top1_hit_own": false,
+        "top1_hit_foreign": false,
+        "top1_flipped": false
+      },
+      "prior=ucr_222_p4|tok=ucr_222_p0": {
+        "spearman_field": 1.0,
+        "spearman_timestep": 1.0,
+        "argmax_shift_samples": 0,
+        "top1_hit_own": false,
+        "top1_hit_foreign": false,
+        "top1_flipped": false
+      },
+      "prior=ucr_222_p4|tok=ucr_222_p1": {
+        "spearman_field": 1.0,
+        "spearman_timestep": 1.0,
+        "argmax_shift_samples": 0,
+        "top1_hit_own": false,
+        "top1_hit_foreign": false,
+        "top1_flipped": false
+      },
+      "prior=ucr_222_p4|tok=ucr_222_p2": {
+        "spearman_field": 1.0,
+        "spearman_timestep": 1.0,
+        "argmax_shift_samples": 0,
+        "top1_hit_own": false,
+        "top1_hit_foreign": false,
+        "top1_flipped": false
+      },
+      "prior=ucr_222_p4|tok=ucr_222_p3": {
+        "spearman_field": 1.0,
+        "spearman_timestep": 1.0,
+        "argmax_shift_samples": 0,
+        "top1_hit_own": false,
+        "top1_hit_foreign": false,
+        "top1_flipped": false
+      }
+    },
+    "mean_spearman_timestep": 1.0,
+    "n_top1_flips": 0,
+    "bn_swap": {
+      "ucr_222_p0<-BN(ucr_222_p1)": {
+        "agree_with_own": 1.0,
+        "agree_full_foreign_encoder": 1.0,
+        "bn_share_of_disagreement": null
+      },
+      "ucr_222_p0<-BN(ucr_222_p2)": {
+        "agree_with_own": 1.0,
+        "agree_full_foreign_encoder": 1.0,
+        "bn_share_of_disagreement": null
+      },
+      "ucr_222_p0<-BN(ucr_222_p3)": {
+        "agree_with_own": 1.0,
+        "agree_full_foreign_encoder": 1.0,
+        "bn_share_of_disagreement": null
+      },
+      "ucr_222_p0<-BN(ucr_222_p4)": {
+        "agree_with_own": 1.0,
+        "agree_full_foreign_encoder": 1.0,
+        "bn_share_of_disagreement": null
+      },
+      "ucr_222_p1<-BN(ucr_222_p0)": {
+        "agree_with_own": 1.0,
+        "agree_full_foreign_encoder": 1.0,
+        "bn_share_of_disagreement": null
+      },
+      "ucr_222_p1<-BN(ucr_222_p2)": {
+        "agree_with_own": 1.0,
+        "agree_full_foreign_encoder": 1.0,
+        "bn_share_of_disagreement": null
+      },
+      "ucr_222_p1<-BN(ucr_222_p3)": {
+        "agree_with_own": 1.0,
+        "agree_full_foreign_encoder": 1.0,
+        "bn_share_of_disagreement": null
+      },
+      "ucr_222_p1<-BN(ucr_222_p4)": {
+        "agree_with_own": 1.0,
+        "agree_full_foreign_encoder": 1.0,
+        "bn_share_of_disagreement": null
+      },
+      "ucr_222_p2<-BN(ucr_222_p0)": {
+        "agree_with_own": 1.0,
+        "agree_full_foreign_encoder": 1.0,
+        "bn_share_of_disagreement": null
+      },
+      "ucr_222_p2<-BN(ucr_222_p1)": {
+        "agree_with_own": 1.0,
+        "agree_full_foreign_encoder": 1.0,
+        "bn_share_of_disagreement": null
+      },
+      "ucr_222_p2<-BN(ucr_222_p3)": {
+        "agree_with_own": 1.0,
+        "agree_full_foreign_encoder": 1.0,
+        "bn_share_of_disagreement": null
+      },
+      "ucr_222_p2<-BN(ucr_222_p4)": {
+        "agree_with_own": 1.0,
+        "agree_full_foreign_encoder": 1.0,
+        "bn_share_of_disagreement": null
+      },
+      "ucr_222_p3<-BN(ucr_222_p0)": {
+        "agree_with_own": 1.0,
+        "agree_full_foreign_encoder": 1.0,
+        "bn_share_of_disagreement": null
+      },
+      "ucr_222_p3<-BN(ucr_222_p1)": {
+        "agree_with_own": 1.0,
+        "agree_full_foreign_encoder": 1.0,
+        "bn_share_of_disagreement": null
+      },
+      "ucr_222_p3<-BN(ucr_222_p2)": {
+        "agree_with_own": 1.0,
+        "agree_full_foreign_encoder": 1.0,
+        "bn_share_of_disagreement": null
+      },
+      "ucr_222_p3<-BN(ucr_222_p4)": {
+        "agree_with_own": 1.0,
+        "agree_full_foreign_encoder": 1.0,
+        "bn_share_of_disagreement": null
+      },
+      "ucr_222_p4<-BN(ucr_222_p0)": {
+        "agree_with_own": 1.0,
+        "agree_full_foreign_encoder": 1.0,
+        "bn_share_of_disagreement": null
+      },
+      "ucr_222_p4<-BN(ucr_222_p1)": {
+        "agree_with_own": 1.0,
+        "agree_full_foreign_encoder": 1.0,
+        "bn_share_of_disagreement": null
+      },
+      "ucr_222_p4<-BN(ucr_222_p2)": {
+        "agree_with_own": 1.0,
+        "agree_full_foreign_encoder": 1.0,
+        "bn_share_of_disagreement": null
+      },
+      "ucr_222_p4<-BN(ucr_222_p3)": {
+        "agree_with_own": 1.0,
+        "agree_full_foreign_encoder": 1.0,
+        "bn_share_of_disagreement": null
+      }
+    },
+    "verdict": "IRRILEVANTE (rho=1.0000, 0 ribaltamenti su 20). Il punteggio \u00e8 insensibile a QUALE encoder ha tokenizzato: l'allineamento del tokenizer non serve, la Fase 1 si cancella."
+  },
+  "D3": {
+    "federated_enc_fedavg_bn-shared_prior-partial": {
+      "arm": "federated_enc_fedavg_bn-shared_prior-partial",
+      "shared_body_max_delta": 0.0,
+      "vacuous": true,
+      "verdict": "VACUA su questo arm: il body condiviso \u00e8 IDENTICO su tutti i client (max|\u0394| = 0.00e+00 su 55 tensori) \u2014 \u00e8 l'invariante che federated_stage2 asserisce dopo ogni broadcast. Interpolare due copie dello stesso punto non misura niente: l'invariante di broadcast REGGE, e la LMC va letta sugli arm a prior locale."
+    },
+    "local": {
+      "skipped": true,
+      "reason": "0/5 client in ucr_222"
+    },
+    "federated": {
+      "skipped": true,
+      "reason": "0/5 client in ucr_222"
+    }
+  },
+  "elapsed_s": 1277.5,
+  "D_computed": [
+    "d0",
+    "d1",
+    "d2",
+    "d3",
+    "d4"
+  ]
+}

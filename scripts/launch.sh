@@ -23,11 +23,54 @@ export PIPELINE_PYTHON="$PY"
 # a server death there wedged 14 jobs for 9.9 h with no error. See scripts/mps_ctl.sh.
 MPS_CTL_ENV_ONLY=1 source "$REPO/scripts/mps_ctl.sh"
 
+# ── PRECISIONE FISSATA (2026-08-04) ─────────────────────────────────────────────
+# `_amp_dtype()` legge FEDVQ_AMP e nessuno script lo esportava, quindi vinceva sempre
+# `auto` -- che sceglie in base alla compute capability: fp16 sotto Ampere, bf16 da
+# Ampere in su. Cioe' fp16 su g2 (Quadro RTX 8000, sm_75) e bf16 su g4 (Ada 8.9 /
+# 3090 8.6): la precisione di training dipendeva da QUALE HOST prendeva il job.
+# Nell'archivio pre-cutoff: 195 celle bf16, 150 fp16.
+#
+# Non e' igiene, e' portante. L'ablazione `abl_fp32` su ucr_001 (centralized, W=2P)
+# sposta AUPRC 0,646 -> 0,418 e top-1 1,00 -> 0,40 -- piu' grande di OGNI effetto che
+# lo studio vuole misurare (contributo (A) = -0,112, centralized>local = +0,212).
+#
+# fp16 e non bf16: su Turing bf16 e' EMULATO. Misurato su questo nodo, matmul 4096^3:
+# fp32 22,9 ms / fp16 3,4 ms / bf16 40,2 ms. I tensor core fp16 esistono anche su
+# Ampere e Ada, quindi fp16 e' l'unica precisione veloce su ENTRAMBI gli host.
+# Le parti delicate restano fp32 comunque: l'accumulo delle statistiche sufficienti
+# del VQ ha l'autocast disabilitato dentro il quantizer (Prop.1 resta esatta) e
+# eval/metriche sono fp32.
+export FEDVQ_AMP="${FEDVQ_AMP:-fp16}"
+
 COHORT=""; ARMS="local,centralized"; TAG=""; ENGINE="deep"; EXTRA=""; HEADS="ma_c"
 MODES="local"; DRY=0
-# Default = g2's two RTX 8000. Override with LAUNCH_GPUS="4 5" when driving another host
-# through the sshfs mount (g4 has 6 GPUs and other people on them -- never take them all).
-read -r -a GPUS <<< "${LAUNCH_GPUS:-0 1}"
+# Override with LAUNCH_GPUS="4 5" when driving another host through the sshfs mount.
+#
+# Senza override, su g2 il set NON e' piu' cablato a "0 1": lo CALCOLA scripts/_g2_gpu.sh,
+# perche' g2 e' condivisa con ssanchez e la regola (utente, 2026-08-06) e':
+#     altri su 0 GPU -> usiamo ENTRAMBE
+#     altri su 1 GPU -> usiamo l'ALTRA, e una sola
+#     altri su 2 GPU -> ne prendiamo UNA sola, la meno carica, senza impedirgli il lavoro
+# In nessun caso occupiamo entrambe le schede se qualcun altro sta lavorando. Calcolato e non
+# ricordato apposta: il 2026-08-06 avevo contato i processi di ssanchez come nostri e gli sono
+# finito sopra con 5 job. Stessa filosofia della z-norm pinnata nella coorte.
+if [[ -n "${LAUNCH_GPUS:-}" ]]; then
+  read -r -a GPUS <<< "$LAUNCH_GPUS"
+elif [[ "$(hostname -s)" == "g2" ]] && command -v nvidia-smi >/dev/null 2>&1; then
+  read -r -a GPUS <<< "$(bash "$REPO/scripts/_g2_gpu.sh")"
+  echo "[vincoli g2] schede prese: ${GPUS[*]}"
+  bash "$REPO/scripts/_g2_gpu.sh" --spiega >/dev/null
+else
+  read -r -a GPUS <<< "0 1"
+fi
+# ⛔ g4: GPU0 e GPU5 sono RISERVATE (utente, 2026-08-06) — anche vuote, non sono nostre.
+# Patch applicata il 2026-08-07 A DISPATCHER FERMI (bash rilegge gli script a offset di
+# byte: mai editare questo file con istanze vive). Deroga: G4_ALLOW_RESERVED=1, visibile
+# nel comando. Il default "0 1" del ramo sopra su g4 viene cosi' RIFIUTATO, non corretto
+# in silenzio: chi lancia deve scegliere schede lecite (o usare `_g4_gpu.sh --libere`).
+if [[ "$(hostname -s)" == aida-g4* || "$(hostname -s)" == g4* ]]; then
+  bash "$REPO/scripts/_g4_gpu.sh" "${GPUS[*]}" || exit 4
+fi
 SLOTS_PER_GPU="${SLOTS_PER_GPU:-7}"                  # measured optimum under MPS
 PROTOCOL="${PROTOCOL:-converged}"
 S1_ROUNDS="${S1_ROUNDS:-300}"; LOCAL_EPOCHS="${LOCAL_EPOCHS:-10}"
@@ -87,8 +130,12 @@ fi
 [[ $DRY -eq 0 ]] && mkdir -p "$RUNDIR" "$LOGDIR"
 ORCH="$LOGDIR/_orchestrator.log"
 stamp() { date '+%Y-%m-%d %H:%M:%S'; }
-say() { if [[ $DRY -eq 1 ]]; then echo "[$(stamp)] $*"
-        else echo "[$(stamp)] $*" | tee -a "$ORCH"; fi; }
+# L'HOST nel prefisso: `logs/runs/<tag>/_orchestrator.log` sta sul filesystem CONDIVISO, e
+# g2 e g4 ci scrivono dentro entrambi. Senza il nome dell'host le righe dei due si mescolano
+# e "GPU1" non dice quale scheda sia.
+HOST_TAG="$(hostname)"
+say() { if [[ $DRY -eq 1 ]]; then echo "[$(stamp)][$HOST_TAG] $*"
+        else echo "[$(stamp)][$HOST_TAG] $*" | tee -a "$ORCH"; fi; }
 
 FP=$("$PY" -c "import json;print(json.load(open('cohorts/$COHORT.json'))['fingerprint'])")
 # Seeds are pinned in the cohort; the launcher used to hardcode `--seeds 0` and silently
@@ -234,6 +281,40 @@ fi
 
 # ── DEEP engine ──────────────────────────────────────────────────────────────────────
 mapfile -t JOBLINES < <("$PY" scripts/cohort.py jobs "$COHORT" --arms "$ARMS" --tag "$TAG")
+# ── LAUNCH_ONLY_CLUSTERS: dividere UNA coorte fra due host ──────────────────────
+# `launch.sh` non ha arbitraggio cross-host: lanciarlo su g2 e g4 con lo stesso tag
+# fa dispatchare a entrambi la stessa lista (l'idempotenza piu' sotto non salva --
+# a disco vuoto l'out-json non esiste ancora per nessuno dei due) e due processi
+# finirebbero per scrivere lo stesso stage1.ckpt.
+#
+# La divisione va fatta per SERIE, non per arm: g2 e g4 hanno architetture diverse
+# (sm_75 vs sm_86) e con cudnn.benchmark=True i kernel scelti a tempo cambiano la
+# traiettoria di training. Dividendo per arm il confondente hardware finisce DENTRO
+# un contrasto appaiato; dividendo per serie resta FRA serie, dove i test appaiati
+# non lo vedono. Stessa logica del warning in scripts/run_on_g4.sh.
+#
+# Il filtro sta QUI e non nel ciclo di dispatch, cosi' --dry mostra quello che
+# girera' davvero invece della coorte intera.
+#
+# Una sola coorte -> UN solo cohort_fingerprint per entrambe le meta'. Due coorti
+# con liste di cluster diverse darebbero fingerprint diversi, e le due meta' si
+# dichiarerebbero non confrontabili.
+#
+#   g2:  LAUNCH_ONLY_CLUSTERS="ucr_001,ucr_011"      bash scripts/launch.sh ...
+#   g4:  LAUNCH_ONLY_CLUSTERS="ucr_014,ucr_043,..."  bash scripts/launch.sh ...
+if [[ -n "${LAUNCH_ONLY_CLUSTERS:-}" ]]; then
+  _nall=${#JOBLINES[@]}; _keep=()
+  for _l in "${JOBLINES[@]}"; do
+    _cl=$(awk '{print $2}' <<<"$_l")
+    [[ ",${LAUNCH_ONLY_CLUSTERS}," == *",$_cl,"* ]] && _keep+=("$_l")
+  done
+  JOBLINES=("${_keep[@]}")
+  say "!! LAUNCH_ONLY_CLUSTERS=$LAUNCH_ONLY_CLUSTERS -- $((_nall-${#JOBLINES[@]})) job filtrati, ${#JOBLINES[@]} restano"
+  say "!! questa e' una META' della coorte: l'altra deve girare altrove, o la tabella e' incompleta"
+  if [[ ${#JOBLINES[@]} -eq 0 ]]; then
+    echo "REFUSING: il filtro non ha lasciato nessun job -- nome cluster sbagliato?" >&2; exit 2
+  fi
+fi
 say "=== deep [$TAG] cohort=$COHORT ($FP) ==="
 say "    arms: $ARMS"
 say "    protocol=$PROTOCOL s1_rounds=$S1_ROUNDS s2_rounds=$S2_ROUNDS local_epochs=$LOCAL_EPOCHS patience=$PATIENCE batch=$BATCH"
@@ -348,6 +429,19 @@ for line in "${JOBLINES[@]}"; do
   while :; do reap; slot="$(free_slot)"; [[ -n "$slot" ]] && break; sleep 20; done
   gpu="${slot%%:*}"
   say "START $name (W=$win tol=$tol) -> GPU$gpu (slot $slot)"
+  # ── DOVE e' girata questa cella ─────────────────────────────────────────────────
+  # Senza questo l'hardware non e' ricostruibile a posteriori: `knobs.json` registra solo
+  # `amp_dtype`, `RUN.json` non ha l'host, e il log dell'orchestratore e' CONDIVISO fra g2 e
+  # g4 sul filesystem montato -- quindi "GPU1" e' ambiguo (esiste su entrambi, ma e' una
+  # Quadro RTX 8000 sm_75 su uno e una RTX 3090 sm_86 sull'altro).
+  #
+  # Serve perche' i contrasti dello studio sono DENTRO la serie: se le celle di una serie
+  # finissero su architetture diverse, il confondente hardware entrerebbe nel contrasto. La
+  # precauzione va presa nello scheduling, ma senza questa riga non e' VERIFICABILE dopo.
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$(date -u +%FT%TZ)" "$(hostname)" "$gpu" \
+    "$(nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader -i "$gpu" 2>/dev/null | tr -d ' ' | tr ',' '/')" \
+    "$ds" "$cl" "$arm" >> "$RUNDIR/placement.tsv"
   CUDA_VISIBLE_DEVICES="$gpu" OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 \
     nohup bash -c "$cmd" > "$LOGDIR/$name.log" 2>&1 &
   SLOT_PID[$slot]=$!; SLOT_NAME[$slot]="$name"; NRUN=$((NRUN+1)); sleep 3

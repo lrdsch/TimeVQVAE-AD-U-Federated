@@ -472,6 +472,23 @@ def apply_env_overrides(cfg: Config) -> Config:
     `SCORE_MASK_CHUNK` and `DETECT_AMP` were parsed only inside `load_config()` and were
     silently DROPPED for every federated run — the flag looked honoured and did nothing.
 
+      S1_MAX_STEPS / S2_MAX_STEPS   — alza il tetto di step di uno stage. NON regala
+                                      compute: serve a far scattare l'early stopping che
+                                      c'e' gia'. Misurato il 2026-08-06: `local` e
+                                      `centralized` colpiscono il tetto di 10 000 step PRIMA
+                                      che la pazienza firmi su 6 serie su 10 (su `ucr_011`
+                                      4 client su 5), mentre gli arm federati non lo toccano
+                                      mai — si fermano sulla pazienza a 6 round e ne usano al
+                                      massimo 119 su 300. Le due famiglie si fermavano quindi
+                                      per ragioni diverse: convergenza da una parte,
+                                      esaurimento di budget dall'altra.
+      EARLY_STOPPING=0              — disattiva la pazienza: il training arriva al tetto.
+                                      ⚠ Da solo NON basta a ottenere il modello "sovrallenato":
+                                      `_converged_loop` ripristina comunque `best_state` a
+                                      fine corsa, quindi si otterrebbe lo stesso modello, ore
+                                      dopo (vedi `keep_last_weights` in TrainingConfig). Serve
+                                      KEEP_LAST_WEIGHTS=1 insieme.
+      KEEP_LAST_WEIGHTS=0|1         — tiene i pesi dell'ultimo passo invece del miglior-su-val.
       AMP=0|1                       — training fp16 autocast off/on (default on)
       SCORE_MASK_CHUNK=<int>        — batched per-column mask scoring budget (default 1024;
                                       1 restores the one-forward-per-column path)
@@ -479,6 +496,23 @@ def apply_env_overrides(cfg: Config) -> Config:
       TVQ_SMOKE=1                   — SMOKE MODE: collapse every converged-loop budget so a
                                       full arm sweep finishes in minutes. NOT REPORTABLE.
     """
+    # ── budget di training: non settati = comportamento IDENTICO ────────────────
+    # Introdotti a campagna in corso (2026-08-06) con 19 job in volo: ogni knob qui e' un
+    # no-op se la variabile non c'e', quindi i job gia' dispatchati restano byte-identici.
+    for _var, _obj, _field in (("S1_MAX_STEPS", cfg.training, "stage1_max_steps"),
+                               ("S2_MAX_STEPS", cfg.training, "stage2_max_steps")):
+        _v = os.environ.get(_var)
+        if _v:
+            setattr(_obj, _field, int(_v))
+            print(f"[config] {_var}={_v} -> training.{_field}")
+    if os.environ.get("EARLY_STOPPING") == "0":
+        cfg.training.early_stopping = False
+        print("[config] EARLY_STOPPING=0 -> corsa fino al tetto di step")
+    if os.environ.get("KEEP_LAST_WEIGHTS") in ("0", "1"):
+        cfg.training.keep_last_weights = os.environ["KEEP_LAST_WEIGHTS"] == "1"
+        print(f"[config] KEEP_LAST_WEIGHTS={os.environ['KEEP_LAST_WEIGHTS']} -> "
+              f"training.keep_last_weights={cfg.training.keep_last_weights}")
+
     if os.environ.get("TVQ_SMOKE") == "1":
         # The `converged` protocol is exactly the path a smoke test most needs to exercise
         # (select_on_val, patience, best-on-val restore) and exactly the one that makes a

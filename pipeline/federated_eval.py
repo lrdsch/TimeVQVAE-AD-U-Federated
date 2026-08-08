@@ -40,7 +40,7 @@ from torch.utils.data import ConcatDataset, Subset
 
 from config import Config, apply_dataset_overrides, apply_env_overrides
 from data import make_dataloaders, _build_loader
-from stage1 import Stage1VQVAE, save_stage1_checkpoint
+from stage1 import Stage1VQVAE, save_stage1_checkpoint, load_stage1
 from stage2 import Stage2System, save_stage2_checkpoint, load_stage2, counterfactual
 from utils import resolve_path, seed_everything, force_utf8_stdout
 import detect
@@ -115,6 +115,12 @@ OTHER_ARMS = [
     "federated_fedavgm", "federated_fedsgd", "federated_fedsgd_fedenc",
     "federated_fedsgd_align", "federated_fedsgd_pooltok",
     "federated_pooltok_centralprior",
+    "fedtok_centralprior",                # ⛔ DIAGNOSTIC (federation-illegal): central prior
+                                          # on a frozen federated tokenizer — the ceiling of
+                                          # every stage-2 aggregation upgrade. PROJECT_S2_GATES §2b.
+    "centraltok_fedprior",                # ⛔ DIAGNOSTIC (federation-illegal): the INVERSE —
+                                          # central tokenizer + A2's federated stage-2. Completes
+                                          # the 2×2 attribution on ucr_170 (2026-08-08).
     "federated_fedavg_whole",             # DEPRECATED alias of federated_fedavg_cb_sharedprior
 ]
 
@@ -155,6 +161,41 @@ FLAG_OWNER_ARMS: dict[str, tuple[str, ...]] = {
     # so it is legible from the arm id; there the flag is overridden, not honoured.
     "fed_enc_cb": ("federated_enc_fedavg", "federated_enc_fedprox",
                    "federated_enc_fedproto", "federated_enc_commoninit"),
+    # Stage-2 server/regime knobs. Before 2026-08-07 the first four had NO entry here, so
+    # `--tau-steps 8 --arms federated_cb_only` was accepted, silently ignored, and RUN.json
+    # recorded it as applied — exactly the failure this dict exists to prevent.
+    "tau_steps": _ENC_TRIO_ARMS + ("federated_fedsgd", "federated_fedsgd_pooltok",
+                                   "federated_fedsgd_fedenc", "federated_fedsgd_align"),
+    "server_opt": _ENC_TRIO_ARMS + ("federated_fedsgd", "federated_fedsgd_pooltok",
+                                    "federated_fedsgd_fedenc", "federated_fedsgd_align"),
+    "server_lr": _ENC_TRIO_ARMS + ("federated_fedsgd", "federated_fedsgd_pooltok",
+                                   "federated_fedsgd_fedenc", "federated_fedsgd_align"),
+    "server_momentum": ("federated_fedavgm",),
+    "s2_server_momentum": _ENC_TRIO_ARMS,
+    "s2_momentum_skip_round0": _ENC_TRIO_ARMS,
+    # b1/b2/eps are forwarded ONLY by the enc-trio branch (the fedsgd probe branches predate
+    # them and pass server_opt/server_lr alone) — owners restricted accordingly, or the
+    # check would bless a flag those arms still ignore.
+    "server_b1": _ENC_TRIO_ARMS,
+    "server_b2": _ENC_TRIO_ARMS,
+    "server_eps": _ENC_TRIO_ARMS,
+    # NB --fed-s2-val is NOT listed: it is honoured everywhere stage-2 val exists (the
+    # federated shared-body loop AND the per-client converged loop the baselines use).
+    # centraltok_fedprior reads the val cadence and the EVAL-counted patience too (its
+    # dispatch branch forwards them into federated_stage2 like the trio does).
+    "fed_s2_val_every": _ENC_TRIO_ARMS + ("centraltok_fedprior",),
+    "fed_s2_patience": _ENC_TRIO_ARMS + ("centraltok_fedprior",),
+    "fed_s2_agg_penalty": _ENC_TRIO_ARMS,
+    "fed_s2_snapshot_every": _ENC_TRIO_ARMS,
+    # Forwarded only by the trio branch (enc_sched=args.fed_enc_sched): without this entry
+    # `--fed-enc-sched cosine` on a baseline rerun was accepted, recorded in RUN.json and
+    # silently ignored — the exact failure class this dict exists to refuse (audit 2026-08-08).
+    "fed_enc_sched": _ENC_TRIO_ARMS,
+    # FedProx-on-the-PRIOR (≠ fedprox_mu above, which anchors the stage-1 ENCODER and is
+    # owned by the federated_enc_fedprox arms): forwarded by the enc-trio branch only.
+    "fed_prior_prox_mu": _ENC_TRIO_ARMS,
+    "fed_prior_prox_form": _ENC_TRIO_ARMS,
+    "fedtokcp_stage1_root": ("fedtok_centralprior", "centraltok_fedprior"),
 }
 
 
@@ -450,6 +491,12 @@ def _restage2_loader(cfg: Config, loader, shuffle: bool):
                          cfg.dataset.num_workers, shuffle=shuffle)
 
 
+# --fed-s2-val, visible to every stage-2 val site. A mutable dict (like _RESUME_CTX), set
+# once by main() after parse_args — threading it through the 18 train call sites would touch
+# every arm's signature for a knob that defaults to no-op.
+_S2_VAL_MODE: dict = {"mode": "legacy"}
+
+
 def _build_train_stage2_converged(cfg: Config, stage1: Stage1VQVAE, train_loader,
                                   val_loader, device, example: torch.Tensor,
                                   tag: str = "") -> Stage2System:
@@ -467,9 +514,24 @@ def _build_train_stage2_converged(cfg: Config, stage1: Stage1VQVAE, train_loader
         s2._inform_latent_shape()
         return s2.prior(tokens).loss
 
+    def _val(batch):
+        # --fed-s2-val fixed: freeze the MaskGIT masks the val forward draws, so repeated
+        # evals of the same weights return the same number (legacy: σ≈0.006-0.018 nats of
+        # mask-resampling noise vs min_delta=1e-4). fork_rng leaves the TRAINING stream
+        # untouched — trajectories are byte-identical either way. The per-tag seed keeps
+        # different clients' oracles decorrelated; same masks across evals is the point.
+        s2.prior.eval()
+        if _S2_VAL_MODE["mode"] != "fixed":
+            return _loss(batch)
+        devs = [device] if getattr(device, "type", "") == "cuda" else []
+        with torch.random.fork_rng(devices=devs):
+            torch.manual_seed(int.from_bytes(
+                hashlib.blake2b(f"s2val:{tag}".encode(), digest_size=6).digest(), "big"))
+            return _loss(batch)
+
     _converged_loop(
         step_fn=lambda b: (s2.prior.train(), _loss(b))[1],
-        val_fn=lambda b: (s2.prior.eval(), _loss(b))[1],
+        val_fn=_val,
         params=s2.prior.parameters(), cfg=cfg, stage=2,
         batches_per_epoch=len(train_loader), train_loader=train_loader,
         val_loader=val_loader, model_for_state=s2.prior, tag=tag, device=device)
@@ -652,6 +714,154 @@ def train_centralized(cfg, entities, data_by_e, s1_epochs, s2_epochs, device, po
     return {e: (s1, s2) for e in entities}                                  # same model for every client
 
 
+def train_fedtok_centralprior(cfg, entities, data_by_e, device, stage1_root: str,
+                              cluster: str, seed: int) -> dict:
+    """⛔ DIAGNOSTIC, federation-ILLEGAL — never a paper arm.
+
+    The ceiling of EVERY stage-2 aggregation upgrade, measured in one cell: A2's stage-1
+    encoders end the run IDENTICAL across clients (full FedAvg + pooled BN + shared
+    codebook ⇒ the tokenization is client-independent), so training ONE prior centrally on
+    the POOLED token stream, with the baselines' own converged recipe, bounds from above
+    what any FedSGD-τ / FedAdam / FedAvgM / FedProx variant of the shared body can reach.
+    If this does not beat A2's federated prior on the money series, the stage-2
+    aggregation direction is dead by construction (documentation/PROJECT_S2_GATES.md §2b).
+
+    Pools raw windows across clients (that is the point — it is an oracle), and detects
+    with the single central prior on every client's test shard, `centralized`-style.
+    """
+    loader = _pooled_loader(cfg, entities, data_by_e)             # entity-MIXED batches
+    ex = next(iter(loader))["inputs"][:1]
+    src = Path(stage1_root) / cfg.dataset.name / cluster / f"seed{seed}"
+    # The SOURCE arm dir: exactly one is expected under seed<k>/ for the A2 tag. Globbing
+    # (not hardcoding the knob-suffixed name) keeps this working if the source tag ever
+    # carries different suffix bits — but more than one match is refused, not "first wins".
+    cands = sorted(d for d in src.glob("federated_enc_*") if d.is_dir())
+    if len(cands) != 1:
+        raise SystemExit(f"fedtok_centralprior: expected exactly ONE source arm dir under "
+                         f"{src}, found {len(cands)}: {[c.name for c in cands]} — pass a "
+                         f"--fedtokcp-stage1-root whose tag holds a single A2-family run.")
+    ck = {e: cands[0] / e / "stage1.ckpt" for e in entities}
+    missing = [str(p) for p in ck.values() if not p.exists()]
+    if missing:
+        raise SystemExit(f"fedtok_centralprior: missing stage1.ckpt(s): {missing}")
+    # THE PREMISE, VERIFIED, NOT ASSUMED: the diagnostic only bounds stage-2 upgrades if
+    # the TOKENIZATION really is client-independent — i.e. transform+encoder+quantizer
+    # identical. The RECONSTRUCTION path is excluded on purpose: A2 never federates it (it
+    # stays local by design), it plays no part in tokenization, and each client KEEPS its
+    # own below so the s_local reconstruction score stays exactly A2's — the diagnostic
+    # then isolates the prior. That path is decoder_2d/decoder_1d AND `refinement` (the
+    # learned Linear(T,T) residual applied to the waveform AFTER the inverse STFT,
+    # stage1.py:138-160 — downstream of the decoder, upstream of nothing token-related).
+    # …and `num_batches_tracked`: the int64 BN step counter, LOCAL in every --fed-enc-bn
+    # mode by documented design, and inert at eval time (eval-mode BN reads only
+    # running_mean/running_var — which MUST match, and are checked).
+    ref = torch.load(str(ck[entities[0]]), map_location="cpu")["state_dict"]
+    tok_keys = [k for k in ref if not k.startswith(("decoder", "refinement"))
+                and not k.endswith("num_batches_tracked")]
+    for e in entities[1:]:
+        other = torch.load(str(ck[e]), map_location="cpu")["state_dict"]
+        diffs = [k for k in tok_keys if not torch.allclose(ref[k], other[k], atol=1e-6)]
+        if diffs:
+            raise SystemExit(f"fedtok_centralprior: TOKENIZER stage-1 of {e} differs from "
+                             f"{entities[0]} on {len(diffs)}/{len(tok_keys)} non-decoder "
+                             f"tensors (e.g. {diffs[:3]}) — the pooled-token premise fails, "
+                             "the diagnostic would bound nothing.")
+    print(f"[fedtokcp] tokenizer identity verified across {len(entities)} clients "
+          f"({len(tok_keys)} non-decoder tensors, atol=1e-6; decoders stay per-client); "
+          f"source={cands[0]}")
+    # Per-client stage-1 (identical encoder/quantizer, OWN decoder), frozen.
+    s1_by_e = {e: load_stage1(ck[e], cfg, ex, device) for e in entities}
+    s1 = s1_by_e[entities[0]]
+    val_loader = _pooled_val_loader(cfg, entities, data_by_e)
+    # The baselines' EXACT converged recipe (warmup+cosine over stage2_max_steps, val
+    # early-stop, best-on-val restore) — and the val oracle honours --fed-s2-val like
+    # every other _build_train_stage2_converged caller. Tokens come from s1 (= p0), but
+    # every client's tokens are identical by the check above.
+    s2 = _build_train_stage2_converged(cfg, s1, loader, val_loader, device, ex, tag="fedtokcp")
+    print(f"[fedtokcp] central prior trained on {len(loader.dataset)} pooled windows from "
+          f"{len(entities)} clients, on the FROZEN federated tokenizer")
+    # ONE central prior, each client's OWN stage-1 (own decoder for s_local): wrap the
+    # trained prior weights around every client's s1.
+    models = {}
+    for e in entities:
+        if e == entities[0]:
+            models[e] = (s1, s2)
+            continue
+        s2_e = Stage2System(cfg, s1_by_e[e])
+        s2_e.prior.to(device)
+        s2_e.materialize(ex.to(device))
+        s2_e.to(device)
+        s2_e.prior.load_state_dict(s2.prior.state_dict())
+        s2_e.stage1.eval(); s2_e.prior.eval()
+        models[e] = (s1_by_e[e], s2_e)
+    return models
+
+
+def train_centraltok_fedprior(cfg, entities, data_by_e, device, stage1_root: str,
+                              cluster: str, seed: int, *, s2_rounds: int, local_epochs: int,
+                              select_on_val: bool, patience_rounds: int, val_mode: str,
+                              val_every: int, out_history: dict | None = None) -> dict:
+    """⛔ DIAGNOSTIC, federation-ILLEGAL — the INVERSE of train_fedtok_centralprior.
+
+    Central TOKENIZER (the `centralized` arm's stage-1: ONE model trained on pooled
+    windows) frozen and handed identically to every client; stage 2 then runs A2's EXACT
+    federated loop (shared prior body FedAvg + local heads, epoch regime) on each client's
+    OWN data shard. Completes the 2×2 attribution with {A2, fedtokcp, centralized}:
+
+        tokenizer \\ prior |  federated   |  central
+        federated (A2 s1) |  A2 = 0.086  |  fedtokcp = 0.202     (ucr_170, AUPRC)
+        central   (c12d)  |  THIS ARM    |  centralized = 0.878
+
+    If this cell lands near `centralized`, the federated stage-1 is the SOLE culprit on
+    ucr_170; if it lands near fedtokcp, the federated stage-2 carries damage of its own.
+    """
+    src = Path(stage1_root) / cfg.dataset.name / cluster / f"seed{seed}"
+    cands = sorted(d for d in src.glob("centralized*") if d.is_dir())
+    if len(cands) != 1:
+        raise SystemExit(f"centraltok_fedprior: expected exactly ONE centralized source arm "
+                         f"dir under {src}, found {len(cands)}: {[c.name for c in cands]} — "
+                         f"pass a --fedtokcp-stage1-root whose tag holds a single "
+                         f"`centralized` run (e.g. artifacts/runs/zn_main/ckpt).")
+    ck = {e: cands[0] / e / "stage1.ckpt" for e in entities}
+    missing = [str(p) for p in ck.values() if not p.exists()]
+    if missing:
+        raise SystemExit(f"centraltok_fedprior: missing stage1.ckpt(s): {missing}")
+    # THE PREMISE, VERIFIED: `centralized` trains ONE stage-1 and saves it per entity — the
+    # five files must be the SAME model on EVERY tensor (decoder included: s_local must be
+    # central too, or the contrast would smuggle per-client reconstruction paths in).
+    ref = torch.load(str(ck[entities[0]]), map_location="cpu")["state_dict"]
+    for e in entities[1:]:
+        other = torch.load(str(ck[e]), map_location="cpu")["state_dict"]
+        diffs = [k for k in ref if not torch.allclose(ref[k], other[k], atol=1e-6)]
+        if diffs:
+            raise SystemExit(f"centraltok_fedprior: centralized stage-1 of {e} differs from "
+                             f"{entities[0]} on {len(diffs)}/{len(ref)} tensors "
+                             f"(e.g. {diffs[:3]}) — the source is not one central model.")
+    print(f"[ctfp] central tokenizer identity verified across {len(entities)} clients "
+          f"(ALL tensors, atol=1e-6; source={cands[0]})")
+    from types import SimpleNamespace
+    clients = []
+    for e in entities:
+        ex = next(iter(data_by_e[e].train_loader))["inputs"][:1]
+        s1 = load_stage1(ck[e], cfg, ex, device)
+        # The duck-typed subset of ClientState that federated_stage2/_build_stage2_client
+        # actually reads: entity_id, cfg, model, data.
+        clients.append(SimpleNamespace(entity_id=e, cfg=cfg, model=s1, data=data_by_e[e]))
+    print(f"[ctfp] stage 2: A2's federated loop (shared body FedAvg + local heads) on the "
+          f"FROZEN central tokenizer — ceiling {s2_rounds} rounds, patience "
+          f"{patience_rounds}, val={val_mode}")
+    s2_clients, h2, _ = federated_stage2(clients, cfg, rounds=s2_rounds,
+                                         local_epochs=local_epochs, seed=seed,
+                                         local_prefixes=LOCAL_PRIOR_PREFIXES,
+                                         select_on_val=select_on_val, val_mode=val_mode,
+                                         val_every=val_every,
+                                         patience_rounds=patience_rounds)
+    if out_history is not None:
+        out_history["cb_mode"] = "central-oracle"
+        out_history["stage2"] = h2
+    return {c.entity_id: (c.s2.stage1, c.s2) for c in s2_clients}
+
+
 # Set by main() before each (arm, seed); read by `train_federated` when its own
 # resume_from/resume_out are not given. Module-level rather than threaded through all 18
 # train_federated call sites, so no other arm's signature or behaviour changes.
@@ -674,6 +884,11 @@ def train_federated(cfg, entities, s1_rounds, s2_rounds, local_epochs, device, s
                     fed_align: str = "off", align_weight: float = 0.0, align_cluster: str | None = None,
                     server_momentum: float = 0.0,
                     tau_steps: int = 0, server_opt: str = "sgd", server_lr: float = 0.01,
+                    server_b1: float = 0.9, server_b2: float = 0.99, server_eps: float = 1e-3,
+                    server_momentum_skip_round0: bool = False,
+                    s2_val_mode: str = "legacy", s2_val_every: int = 1, s2_patience: int = 0,
+                    s2_agg_penalty: bool = False, s2_snapshot_every: int = 0,
+                    prior_prox_mu: float = 0.0, prior_prox_form: str = "decoupled",
                     proto_weight: float = 0.0, proto_probe_windows: int = 1024,
                     proto_mask_ratio: float = 0.5, protocol: str = "fixed",
                     out_history: dict | None = None) -> dict:
@@ -727,7 +942,11 @@ def train_federated(cfg, entities, s1_rounds, s2_rounds, local_epochs, device, s
     if out_history is not None:
         out_history["stage1"] = s1_history
     prior_fully_local = (local_prefixes == ("",))
-    if converged and prior_fully_local and proto_weight == 0 and tau_steps == 0:
+    # `prior_prox_mu == 0` in the fast-path condition: with a fully-local prior a μ>0 call
+    # must NOT be silently converted to the per-client converged loop — falling through to
+    # federated_stage2 makes it raise (empty anchored-param set), loudly.
+    if converged and prior_fully_local and proto_weight == 0 and tau_steps == 0 \
+            and prior_prox_mu == 0:
         out = {}
         for c in clients:
             d = next(next(iter(c.model.parameters())).device for _ in [0])
@@ -750,11 +969,24 @@ def train_federated(cfg, entities, s1_rounds, s2_rounds, local_epochs, device, s
         s2_clients, h2, _ = federated_stage2(clients, cfg, rounds=s2_rounds, local_epochs=local_epochs, seed=seed,
                                              local_prefixes=local_prefixes, server_momentum=server_momentum,
                                              tau_steps=tau_steps, server_opt=server_opt, server_lr=server_lr,
+                                             server_b1=server_b1, server_b2=server_b2,
+                                             server_eps=server_eps,
+                                             server_momentum_skip_round0=server_momentum_skip_round0,
+                                             val_mode=s2_val_mode, val_every=s2_val_every,
+                                             agg_penalty=s2_agg_penalty,
+                                             snapshot_every=s2_snapshot_every,
+                                             prior_prox_mu=prior_prox_mu,
+                                             prior_prox_form=prior_prox_form,
+                                             # the arm scratch dir — same place the resume
+                                             # bundle lives, so snapshots stay with their run
+                                             snapshot_dir=resume_out,
                                              select_on_val=converged,
                                              # Same ceiling-not-budget contract as stage 1: the
                                              # shared prior body has no other early stop, so
                                              # without this whatever --s2-rounds is IS the budget.
-                                             patience_rounds=patience_rounds)
+                                             # s2_patience (EVALS) overrides the shared knob so a
+                                             # τ retune cannot silently change stage-1 stopping.
+                                             patience_rounds=(s2_patience or patience_rounds))
     if out_history is not None:
         out_history["stage2"] = h2
     return {c.entity_id: (c.s2.stage1, c.s2) for c in s2_clients}
@@ -1006,6 +1238,23 @@ def _arm_tag(arm: str, fed: dict | None) -> str:
         bits.append(f"cb-{fed['cb']}")
     if fed.get("prior") not in (None, "local"):
         bits.append(f"prior-{fed['prior']}")
+    # ── stage-2 server bits (2026-08-07), terminal and in canonical order ───────────────
+    # Emitted only when non-default, so every existing directory name is unchanged. Without
+    # these, two stage-2 variants of the same enc knobs would SHARE
+    # .../seed0/federated_enc_fedavg_bn-shared_prior-partial/ — mixed checkpoints,
+    # knobs.json overwritten by the last writer, and _fed_resume.pt adopted cross-variant.
+    if fed.get("tau"):
+        bits.append(f"tau{fed['tau']:g}")
+    if fed.get("srv"):
+        bits.append(f"srv-{fed['srv']}_slr{fed['slr']:g}")
+    if fed.get("sm"):
+        bits.append(f"sm{fed['sm']:g}" + ("_skip0" if fed.get("sm_skip0") else ""))
+    if fed.get("pmu"):   # FedProx-on-prior (port to come); reserved here so the order is fixed
+        bits.append(f"pmu{fed['pmu']:g}" + ("" if fed.get("pform") == "loss" else "_dec"))
+    if fed.get("K"):     # codebook capacity override (--codebook-size): without this bit a
+        bits.append(f"K{fed['K']}")   # K=128 cell shares plain A2's dir NAME and any script
+                                      # keyed on (fingerprint, cluster, arm-dir) pools them
+                                      # as comparable — the CLAUDE.md fingerprint trap.
     return "_".join([arm, *bits]) if bits else arm
 
 
@@ -1131,6 +1380,65 @@ def main() -> int:
     p.add_argument("--server-lr", type=float, default=0.01, help="FedAdam server step size η.")
     p.add_argument("--server-momentum", type=float, default=0.9,
                    help="FedAvgM server momentum for the 'federated_fedavgm' arm (0 = plain FedAvg).")
+    # ── stage-2 knobs for the ENC-TRIO arms (the A2 family) ─────────────────────────────
+    # Dedicated flags with NULL defaults, on purpose: --server-momentum above defaults to
+    # 0.9 because it was written for federated_fedavgm — forwarding it blindly from the trio
+    # branch would silently turn every plain A2 rerun into FedAvgM. tau/server-opt/server-lr
+    # are shared with the fedsgd arms (their argparse defaults ARE the function defaults, so
+    # reuse is safe); only the momentum needs its own name.
+    p.add_argument("--s2-server-momentum", type=float, default=0.0,
+                   help="FedAvgM for the enc-trio stage-2 prior body (0 = off = plain FedAvg, "
+                        "today's behaviour). Mutually exclusive with --server-opt fedadam. "
+                        "β>0.5 with full local epochs is warned against (undamped heavy-ball).")
+    p.add_argument("--s2-momentum-skip-round0", action="store_true",
+                   help="FedAvgM: skip momentum accumulation at round 0 (the round-0 average "
+                        "is measured destructive: val(agg0) above the uniform floor).")
+    p.add_argument("--server-b1", type=float, default=0.9,
+                   help="FedAdam β1 (was hardcoded; default unchanged).")
+    p.add_argument("--server-b2", type=float, default=0.99,
+                   help="FedAdam β2 (was hardcoded; default unchanged).")
+    p.add_argument("--server-eps", type=float, default=1e-3,
+                   help="FedAdam ε (was hardcoded; default unchanged — NB large: damps early steps).")
+    p.add_argument("--fed-s2-val", type=str, default="legacy", choices=["legacy", "fixed"],
+                   help="stage-2 val oracle. 'legacy' (default, every run on disk) = random "
+                        "MaskGIT masks + autocast: σ≈0.006-0.018 nats/eval. 'fixed' = frozen "
+                        "per-client masks (fork_rng: training stream untouched) + fp32. "
+                        "PREREQUISITE for any small-τ run; applies to the federated shared-body "
+                        "val AND to the per-client converged loop (baselines/cb_only priors).")
+    p.add_argument("--fed-s2-val-every", type=int, default=1,
+                   help="evaluate the stage-2 cohort val every K rounds (aggregation still every "
+                        "round); patience counts EVALS. 1 = today's behaviour. Use with small τ "
+                        "(e.g. τ=16→K=2, τ=1→K=16) or per-round val dominates wall-clock.")
+    p.add_argument("--fed-s2-agg-penalty", action="store_true",
+                   help="log per eval round the val of each client's OWN end-of-round body "
+                        "next to the broadcast average's: agg_penalty = val_post − val_pre. "
+                        "The number that decides FedProx-on-the-prior.")
+    p.add_argument("--fed-s2-snapshot-every", type=int, default=0,
+                   help=">0: save shared body + per-client heads every K rounds into the arm "
+                        "dir (s2_snap_rNNNN.pt) plus s2_last.pt before the best-round restore "
+                        "— fuels the trajectory-detection probe and the best-vs-last contrast.")
+    p.add_argument("--fedtokcp-stage1-root", type=str, default=None,
+                   help="fedtok_centralprior ONLY: ckpt root of the SOURCE federated run "
+                        "(e.g. artifacts/runs/zn_a2/ckpt) whose frozen stage-1 tokenizer the "
+                        "central prior is trained on. The arm dir under it must hold one "
+                        "<entity>/stage1.ckpt per client.")
+    p.add_argument("--fed-s2-patience", type=int, default=0,
+                   help="separate patience for the stage-2 shared-body loop, in EVALS "
+                        "(0 = inherit --fed-patience-rounds, today's behaviour). Needed because "
+                        "one --fed-patience-rounds feeds BOTH stages: retuning it for a τ regime "
+                        "would silently change stage-1 stopping too.")
+    p.add_argument("--fed-prior-prox-mu", type=float, default=0.0,
+                   help="FedProx on the SHARED stage-2 prior body (enc-trio arms): μ of the "
+                        "proximal anchor toward the start-of-round broadcast body; params only, "
+                        "local heads never anchored. 0 = off (plain FedAvg, bit-identical). "
+                        "NB declared completeness row: the measured agg_penalty is NEGATIVE "
+                        "late in training, so there is no pathology for μ to fix.")
+    p.add_argument("--fed-prior-prox-form", type=str, default="decoupled",
+                   choices=["decoupled", "loss"],
+                   help="'decoupled' (primary): post-step contraction w ← w + lr·μ·(w^t−w), "
+                        "bypasses AdamW's preconditioner — diagnostic prox_pull_frac. "
+                        "'loss': the FedProx paper objective — under AdamW the prox gradient "
+                        "is preconditioned and can be a silent no-op; diagnostic prox_grad_ratio.")
     p.add_argument("--batch", type=int, default=None,
                    help="override BOTH stage batch sizes with one value. Default (unset) "
                         "keeps cfg.dataset.batch_size_stage1/stage2 (256/128) -- i.e. the "
@@ -1196,11 +1504,15 @@ def main() -> int:
                         "FedBN (Li et al., ICLR 2021) actually specifies. 'shared' federates the "
                         "statistics too, POOLED by the law of total variance rather than averaged. "
                         "`num_batches_tracked` stays local in every mode (int64 counter).")
-    p.add_argument("--fed-enc-cb", type=str, default="suffstat", choices=["suffstat", "local"],
+    p.add_argument("--fed-enc-cb", type=str, default="suffstat",
+                   choices=["suffstat", "local", "union_recluster"],
                    help="the VQ CODEBOOK for the trio. 'suffstat' (default) federates it by the "
                         "Prop.1 sufficient-statistic merge; 'local' never federates it at all — "
                         "each client k-means-seeds and EMA-updates its own dictionary exactly as "
                         "the `local` baseline does, so ONLY the encoder crosses the network. "
+                        "'union_recluster' = k-FED-style server step: per-client centroids → "
+                        "union → farthest-point + weighted Lloyd — preserves minority-client "
+                        "motifs the count-pooled M-step dilutes (the ucr_170 fix candidate). "
                         "Incompatible with federated_enc_fedproto, whose classes ARE the shared "
                         "codebook indices (see the error message for why).")
     p.add_argument("--fed-patience-rounds", type=int, default=0,
@@ -1244,7 +1556,7 @@ def main() -> int:
                         "'decoupled' = AdamW-style post-step contraction w += lr·μ·(w^t − w). NB the "
                         "lr: the fraction of drift removed per step is lr·μ, NOT μ (an earlier "
                         "version of this help said μ, wrong by 3 orders of magnitude at our lr). "
-                        "At lr=1e-3, μ=0.1 over 5 steps removes 5e-4 of the drift, not 41%; μ=O(10) "
+                        "At lr=1e-3, μ=0.1 over 5 steps removes 5e-4 of the drift, not 41%%; μ=O(10) "
                         "is what gives the anchor authority over a round. `prox_pull_frac` in the "
                         "round log is the measured 1−(1−lr·μ)^steps — read it, do not assume μ.")
     p.add_argument("--fedproto-weight", type=float, default=1.0,
@@ -1283,6 +1595,19 @@ def main() -> int:
                         "the paper's rule) and, unless --metrics-tolerance is given, the "
                         "VUS/PATE/top-k buffer (window//2) -- pin that to keep tables "
                         "comparable across window settings.")
+    p.add_argument("--window-normalization", choices=["none", "zscore"], default=None,
+                   help="override cfg.dataset.window_normalization. 'zscore' = per-window "
+                        "z-score at window extraction, which is what the TimeVQVAE-AD paper "
+                        "prescribes (S5.2 and A.1: 'each input window is z-normalized', in the "
+                        "same sentence as the T=2P rule) and what upstream does in BOTH training "
+                        "(preprocessing/preprocess.py:149) and detection "
+                        "(evaluation/__init__.py:119). Measured on ucr_001/ucr_043 arm "
+                        "centralized: AUPRC 0.646->0.946 and 0.515->0.868. It also makes the "
+                        "per-entity scaler irrelevant (a per-window z-score is invariant to any "
+                        "preceding affine map), which removes the shard-dependence artefact. "
+                        "NB: NOT honoured by scripts/floor_eval.py, and it attenuates 2 of the 3 "
+                        "toy anomaly families (amp_burst to 21%%, level_shift to 49%%) -- it is a "
+                        "UCR/paper-fidelity knob, not a global default.")
     p.add_argument("--metrics-tolerance", type=int, default=None,
                    help="override cfg.evaluation.paper_metrics_tolerance, the VUS/PATE buffer "
                         "AND the top-k hit radius. Applied AFTER apply_dataset_overrides, so it "
@@ -1295,6 +1620,13 @@ def main() -> int:
                    help="root for per-client checkpoints + detect reports/plots "
                         "(default: artifacts/fed_eval/<dataset>).")
     args = p.parse_args()
+    # One knob, every stage-2 val site: the federated shared-body loop reads it via the
+    # explicit s2_val_mode param; the per-client converged loop (baselines, cb_only-family
+    # priors, A1) reads this module global inside _build_train_stage2_converged.
+    _S2_VAL_MODE["mode"] = args.fed_s2_val
+    if args.fed_s2_val != "legacy":
+        print(f"[config] stage-2 val oracle: {args.fed_s2_val} (frozen masks + fp32 on the "
+              "federated path; frozen masks on the per-client converged path)")
 
     cfg = Config()
     cfg.dataset.name = args.dataset
@@ -1362,6 +1694,19 @@ def main() -> int:
         cfg.dataset.window_length = w
         print(f"[config] window_length -> {w} "
               f"(detection stride becomes {max(1, round(cfg.dataset.eval_stride_rate * w))})")
+    if args.window_normalization is not None:
+        prev = cfg.dataset.window_normalization
+        cfg.dataset.window_normalization = args.window_normalization
+        print(f"[config] window_normalization: {prev!r} -> {args.window_normalization!r}"
+              + (" (paper: 'each input window is z-normalized', S5.2/A.1)"
+                 if args.window_normalization == "zscore" else ""))
+        if args.window_normalization == "zscore":
+            # Loud, because two things silently keep living in the OLD space and would make
+            # any table that mixes them a cross-representation comparison:
+            print("[config] NB with zscore: scripts/floor_eval.py does NOT apply it (the "
+                  "deep-vs-floor comparison becomes cross-space), and the public probe used "
+                  "by federated_align/token-JS is normalised separately -- check both before "
+                  "reporting anything that uses them.")
     # AFTER apply_dataset_overrides (called above), so an explicit tolerance beats both
     # metadata.json's `metrics_tolerance` and the window//2 fallback.
     if args.metrics_tolerance is not None:
@@ -1461,7 +1806,11 @@ def main() -> int:
                                "federated_enc_commoninit_cbshared",
                                "federated_enc_commoninit_cblocal",
                                "federated_enc_fedavg_cblocal", "federated_enc_fedprox_cblocal"}
-        _fed_arms = [a for a in arms if a.startswith("federated") and a not in _CONVERGED_FED]
+        # centraltok_fedprior trains a shared prior body in rounds exactly like the
+        # shared-body federated arms — same budget trap, same warning (audit 2026-08-08).
+        _fed_arms = [a for a in arms
+                     if (a.startswith("federated") or a == "centraltok_fedprior")
+                     and a not in _CONVERGED_FED]
         if _fed_arms:
             print("\n" + "!" * 78)
             print("!! WARNING: these arms are converged at STAGE 1 but NOT at stage 2.")
@@ -1548,6 +1897,35 @@ def main() -> int:
             elif arm == "centralized":
                 models = train_centralized(cfg, entities, data_by_e, args.s1_epochs, args.s2_epochs, device,
                                            protocol=args.protocol)
+            elif arm == "fedtok_centralprior":
+                # ⛔ DIAGNOSTIC — see train_fedtok_centralprior's docstring. Needs the source
+                # federated run's ckpt root; refuses to guess.
+                if not args.fedtokcp_stage1_root:
+                    raise SystemExit("fedtok_centralprior needs --fedtokcp-stage1-root "
+                                     "(e.g. artifacts/runs/zn_a2/ckpt)")
+                if not args.cluster:
+                    raise SystemExit("fedtok_centralprior is per-cluster: pass --cluster")
+                models = train_fedtok_centralprior(cfg, entities, data_by_e, device,
+                                                   args.fedtokcp_stage1_root, args.cluster,
+                                                   seed)
+            elif arm == "centraltok_fedprior":
+                # ⛔ DIAGNOSTIC (inverse of fedtok_centralprior) — see the docstring. The
+                # stage-1 root must point at a tag holding the CENTRALIZED source run.
+                if not args.fedtokcp_stage1_root:
+                    raise SystemExit("centraltok_fedprior needs --fedtokcp-stage1-root "
+                                     "(e.g. artifacts/runs/zn_main/ckpt — the CENTRALIZED source)")
+                if not args.cluster:
+                    raise SystemExit("centraltok_fedprior is per-cluster: pass --cluster")
+                models = train_centraltok_fedprior(
+                    cfg, entities, data_by_e, device, args.fedtokcp_stage1_root,
+                    args.cluster, seed, s2_rounds=args.s2_rounds,
+                    local_epochs=args.local_epochs,
+                    select_on_val=(args.protocol == "converged"),
+                    # same inheritance rule as the trio: the dedicated EVAL-counted knob
+                    # wins, else the shared round-patience feeds stage 2 as it always has.
+                    patience_rounds=(args.fed_s2_patience or args.fed_patience_rounds),
+                    val_mode=args.fed_s2_val, val_every=args.fed_s2_val_every,
+                    out_history=fed_hist)
             elif arm == "centralized_cap":
                 # DIVERSITY vs QUANTITY probe: centralized on a small DIVERSE subsample
                 # (--pool-cap windows drawn across ALL clients) at the SAME data budget as
@@ -1783,8 +2161,30 @@ def main() -> int:
                         "fedproto guard refuses, one level up. Use --fed-enc-prior local.")
                 prefixes = {"local": ("",), "partial": LOCAL_PRIOR_PREFIXES,
                             "shared": ()}[args.fed_enc_prior]
+                # ── stage-2 knob guards (2026-08-07) ─────────────────────────────────────
+                # With a fully-LOCAL prior the shared-key set is EMPTY: every stage-2 server
+                # knob would be a federation no-op dressed as a treatment (and tau>0 also
+                # evicts the run from the per-client converged path). Refuse loudly.
+                _s2_knobs_set = (args.tau_steps > 0 or args.server_opt != "sgd"
+                                 or args.s2_server_momentum > 0
+                                 or args.fed_s2_val_every > 1 or args.fed_s2_patience > 0
+                                 or args.fed_prior_prox_mu > 0)
+                if args.fed_enc_prior == "local" and _s2_knobs_set:
+                    raise SystemExit(
+                        "stage-2 server knobs (--tau-steps/--server-opt/--s2-server-momentum/"
+                        "--fed-s2-val-every/--fed-s2-patience/--fed-prior-prox-mu) with "
+                        "--fed-enc-prior local: the prior is fully per-client, there is NO "
+                        "shared body to aggregate (nor an anchor to pull toward) — the knobs "
+                        "would be silently meaningless. Use --fed-enc-prior partial|shared.")
+                if args.server_opt == "fedadam" and args.s2_server_momentum > 0:
+                    raise SystemExit(
+                        "--server-opt fedadam and --s2-server-momentum are mutually exclusive "
+                        "(if/elif in federated_stage2: fedadam wins silently and the FedAvgM "
+                        "banner lies). Pick one.")
                 # Self-documenting run: these knobs live in argv, NOT in cfg, so without this
                 # echo a knobs.json could not distinguish μ=0.01 from μ=1 after the fact.
+                # Stage-2 keys emitted ONLY when non-default so every existing dir/knobs.json
+                # is byte-identical.
                 fed_echo = {"algo": algo, "scope": args.fed_enc_scope, "bn": args.fed_enc_bn,
                             "prior": args.fed_enc_prior, "cb": cb_regime,
                             "sched": args.fed_enc_sched,
@@ -1795,7 +2195,27 @@ def main() -> int:
                                 "code_weight": args.fedproto_code_weight,
                                 "seed_round0": not args.fedproto_no_seed,
                                 "hybrid_fedavg": hybrid}
-                               if algo == "fedproto" else {})}
+                               if algo == "fedproto" else {}),
+                            **({"tau": args.tau_steps} if args.tau_steps > 0 else {}),
+                            **({"srv": args.server_opt, "slr": args.server_lr,
+                                "sb1": args.server_b1, "sb2": args.server_b2,
+                                "seps": args.server_eps}
+                               if args.server_opt != "sgd" else {}),
+                            **({"sm": args.s2_server_momentum,
+                                "sm_skip0": bool(args.s2_momentum_skip_round0)}
+                               if args.s2_server_momentum > 0 else {}),
+                            **({"s2val": args.fed_s2_val} if args.fed_s2_val != "legacy" else {}),
+                            **({"s2val_every": args.fed_s2_val_every}
+                               if args.fed_s2_val_every > 1 else {}),
+                            **({"s2pat": args.fed_s2_patience} if args.fed_s2_patience > 0 else {}),
+                            **({"s2pen": True} if args.fed_s2_agg_penalty else {}),
+                            **({"s2snap": args.fed_s2_snapshot_every}
+                               if args.fed_s2_snapshot_every > 0 else {}),
+                            **({"pmu": args.fed_prior_prox_mu,
+                                "pform": args.fed_prior_prox_form}
+                               if args.fed_prior_prox_mu > 0 else {}),
+                            **({"K": int(args.codebook_size)}
+                               if args.codebook_size else {})}
                 models = train_federated(cfg, entities, args.s1_rounds, args.s2_rounds,
                                          args.local_epochs, device, seed=seed,
                                          local_prefixes=prefixes, cb_merge=cb_regime,
@@ -1808,6 +2228,21 @@ def main() -> int:
                                          enc_proto_code_weight=args.fedproto_code_weight,
                                          enc_proto_seed_round0=(not args.fedproto_no_seed),
                                          enc_proto_fedavg=hybrid, enc_sched=args.fed_enc_sched,
+                                         # stage-2 server knobs: dedicated flags with NULL
+                                         # defaults (NEVER args.server_momentum here — its
+                                         # argparse default is 0.9, owned by federated_fedavgm).
+                                         tau_steps=args.tau_steps, server_opt=args.server_opt,
+                                         server_lr=args.server_lr, server_b1=args.server_b1,
+                                         server_b2=args.server_b2, server_eps=args.server_eps,
+                                         server_momentum=args.s2_server_momentum,
+                                         server_momentum_skip_round0=bool(args.s2_momentum_skip_round0),
+                                         s2_val_mode=args.fed_s2_val,
+                                         s2_val_every=args.fed_s2_val_every,
+                                         s2_patience=args.fed_s2_patience,
+                                         s2_agg_penalty=bool(args.fed_s2_agg_penalty),
+                                         s2_snapshot_every=args.fed_s2_snapshot_every,
+                                         prior_prox_mu=args.fed_prior_prox_mu,
+                                         prior_prox_form=args.fed_prior_prox_form,
                                          protocol=args.protocol, out_history=fed_hist)
             elif arm == "federated_fedavgm":
                 # ①: FedAvgM (server momentum on the prior pseudo-gradient) + small tau (run with

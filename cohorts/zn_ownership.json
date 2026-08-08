@@ -1,0 +1,723 @@
+{
+ "_perche": [
+  "PARTIZIONE DICHIARATA della campagna z-norm: ogni cella ha UN proprietario e uno solo.",
+  "I duplicati del 2026-08-05 non sono nati da una race ma da liste di serie SCRITTE A MANO",
+  "in sei script diversi, che si sovrapponevano senza che nessuno lo verificasse.",
+  "Qui la lista sta in UN posto; le catene la leggono con scripts/zn_owner.py e",
+  "scripts/zn_audit.py verifica che sia davvero una partizione prima di ogni lancio.",
+  "Il claim atomico (scripts/_claim.sh) resta la rete di sicurezza: questo file rende il",
+  "conflitto impossibile da ESPRIMERE, il claim lo rende impossibile da SUBIRE."
+ ],
+ "cohort": "ucr2p_10",
+ "dataset": "ucr_split_w2p",
+ "seeds": [
+  0
+ ],
+ "series": [
+  "ucr_001",
+  "ucr_011",
+  "ucr_014",
+  "ucr_043",
+  "ucr_082",
+  "ucr_083",
+  "ucr_086",
+  "ucr_170",
+  "ucr_222",
+  "ucr_229"
+ ],
+ "design": {
+  "zn_main": {
+   "arms": [
+    "centralized",
+    "local",
+    "federated",
+    "federated_cb_only",
+    "federated_cb_only_ema",
+    "federated_fedavg_cb_only"
+   ],
+   "series": "ALL"
+  },
+  "zn_enc": {
+   "arms": [
+    "federated_enc_fedavg",
+    "federated_enc_fedprox",
+    "federated_enc_fedproto",
+    "federated_enc_commoninit"
+   ],
+   "series": "ALL",
+   "extra": "--fed-enc-cb suffstat --fed-enc-prior local --fedproto-agg uniform"
+  },
+  "zn_norev": {
+   "arms": [
+    "federated_cb_only_ema_norevive"
+   ],
+   "series": [
+    "ucr_001",
+    "ucr_011",
+    "ucr_014",
+    "ucr_043",
+    "ucr_222",
+    "ucr_229"
+   ],
+   "_perche_solo_6": "Altrove `revive=False` da' una run BIT-IDENTICA a cb_only_ema (federated.py: `if revive and n_dead > 0:` consuma l'RNG solo li' dentro), cioe' un pareggio per costruzione. ucr_001 e' tenuta come controllo di determinismo."
+  },
+  "zn_a1": {
+   "arms": [
+    "federated_enc_fedavg"
+   ],
+   "series": "ALL",
+   "extra": "--fed-enc-cb suffstat --fed-enc-prior local --fed-enc-bn shared"
+  },
+  "zn_a2": {
+   "arms": [
+    "federated_enc_fedavg"
+   ],
+   "series": "ALL",
+   "extra": "--fed-enc-cb suffstat --fed-enc-prior partial --fed-enc-bn shared"
+  },
+  "zn_es": {
+   "series": [
+    "ucr_001",
+    "ucr_011",
+    "ucr_014",
+    "ucr_170",
+    "ucr_222",
+    "ucr_229"
+   ],
+   "arms": [
+    "local"
+   ]
+  },
+  "zn_ot": {
+   "series": [
+    "ucr_001",
+    "ucr_011",
+    "ucr_014",
+    "ucr_043",
+    "ucr_082",
+    "ucr_083",
+    "ucr_086",
+    "ucr_170",
+    "ucr_222",
+    "ucr_229"
+   ],
+   "arms": [
+    "local",
+    "centralized"
+   ]
+  },
+  "zn_floor": {
+   "series": [
+    "ucr_001",
+    "ucr_011",
+    "ucr_014",
+    "ucr_043",
+    "ucr_082",
+    "ucr_083",
+    "ucr_086",
+    "ucr_170",
+    "ucr_222",
+    "ucr_229"
+   ],
+   "arms": [
+    "floor_ma_c_k10",
+    "floor_ma_causal_k10",
+    "floor_ar_p32_lam0.0001",
+    "floor_pca_K8_gamma0.05"
+   ]
+  },
+  "zn_es_c": {
+   "series": [
+    "ucr_001",
+    "ucr_011",
+    "ucr_014",
+    "ucr_222",
+    "ucr_229"
+   ],
+   "arms": [
+    "centralized"
+   ]
+  },
+  "zn_a2s2_ctrl": {
+   "arms": [
+    "federated_enc_fedavg"
+   ],
+   "series": [
+    "ucr_011",
+    "ucr_014",
+    "ucr_043",
+    "ucr_170",
+    "ucr_001",
+    "ucr_082",
+    "ucr_083",
+    "ucr_086",
+    "ucr_222",
+    "ucr_229"
+   ],
+   "_perche": "GATE 1 (PROJECT_S2_GATES.md): ctrl strumentato — resume dello stage-1 di A2, stage-2 FedAvg puro con oracolo FISSO, snapshot di traiettoria, aggregation_penalty. Contrasto obbligatorio: ctrl-A2 deve essere un null. Cambia resume+oracolo INSIEME: se il null fallisce, disambiguare con un mini-ctrl legacy su una serie."
+  },
+  "zn_fedtokcp": {
+   "arms": [
+    "fedtok_centralprior"
+   ],
+   "series": [
+    "ucr_011",
+    "ucr_014",
+    "ucr_043",
+    "ucr_170"
+   ],
+   "_perche": "GATE 0: prior centrale sul tokenizer federato CONGELATO di A2 = tetto di ogni upgrade stage-2. DIAGNOSTICO federation-illegal, mai nel paper. Se non batte A2 su 011/043, la direzione stage-2 muore."
+  },
+  "zn_a2s2_tau64": {
+   "arms": [
+    "federated_enc_fedavg"
+   ],
+   "series": [
+    "ucr_001",
+    "ucr_011",
+    "ucr_014",
+    "ucr_043",
+    "ucr_082",
+    "ucr_083",
+    "ucr_086",
+    "ucr_170",
+    "ucr_222",
+    "ucr_229"
+   ],
+   "_perche": "WAVE τ: τ=64 (~x1.0 costo), il primo gradino della scala τ. Bersaglio misurato dai gate: +0.12 su 011, +0.22 su 043."
+  },
+  "zn_a2s2_tau16": {
+   "arms": [
+    "federated_enc_fedavg"
+   ],
+   "series": [
+    "ucr_001",
+    "ucr_011",
+    "ucr_014",
+    "ucr_043",
+    "ucr_082",
+    "ucr_083",
+    "ucr_086",
+    "ucr_170",
+    "ucr_222",
+    "ucr_229"
+   ],
+   "_perche": "WAVE τ: τ=16, val-every 2, patience 57 eval (step-patience ≈ A2). Il secondo gradino: si sale a τ=1 solo se 64→16 è monotono."
+  },
+  "zn_a2s2_t64adam": {
+   "arms": [
+    "federated_enc_fedavg"
+   ],
+   "series": [
+    "ucr_001",
+    "ucr_011",
+    "ucr_014",
+    "ucr_043",
+    "ucr_082",
+    "ucr_083",
+    "ucr_086",
+    "ucr_170",
+    "ucr_222",
+    "ucr_229"
+   ],
+   "_perche": "WAVE τ: τ=64 + FedAdam slr 0.03 — la composizione raccomandata dal codice stesso; isola il contributo del server adattivo a parità di τ."
+  },
+  "zn_a2s2_pmu1": {
+   "arms": [
+    "federated_enc_fedavg"
+   ],
+   "series": [
+    "ucr_001",
+    "ucr_011",
+    "ucr_014",
+    "ucr_043",
+    "ucr_082",
+    "ucr_083",
+    "ucr_086",
+    "ucr_170",
+    "ucr_222",
+    "ucr_229"
+   ],
+   "_perche": "FedProx-sul-prior μ=1 decoupled (--fed-prior-prox-mu 1). RIGA DI COMPLETEZZA dichiarata: l'agg_penalty misurata è NEGATIVA a fine training (la media è un bonus), quindi la predizione pre-registrata è ≈ctrl. Regime epoch, stessa ricetta del ctrl."
+  },
+  "zn_a2s2_pmu3": {
+   "arms": [
+    "federated_enc_fedavg"
+   ],
+   "series": [
+    "ucr_001",
+    "ucr_011",
+    "ucr_014",
+    "ucr_043",
+    "ucr_082",
+    "ucr_083",
+    "ucr_086",
+    "ucr_170",
+    "ucr_222",
+    "ucr_229"
+   ],
+   "_perche": "FedProx-sul-prior μ=3 decoupled: pull ≈34%/round contro ≈13% di μ=1 — il gradino forte della coppia. Stessa riga di completezza; μ=10 cancellato dal design (§7: 94,6% di pull = un τ-piccolo travestito)."
+  },
+  "zn_170_ctfp": {
+   "arms": [
+    "centraltok_fedprior"
+   ],
+   "series": [
+    "ucr_170"
+   ],
+   "_perche": "FIX-170 diagnostico (federation-ILLEGAL, mai nel paper come arm): tokenizer CENTRALE (stage-1 di zn_main/centralized) + stage-2 federato di A2. Completa il 2×2 con {A2 0.086, fedtokcp 0.202, centralized 0.878}: se ≈centralized, lo stage-1 federato è l'UNICO colpevole su 170."
+  },
+  "zn_170_ur": {
+   "arms": [
+    "federated_enc_fedavg"
+   ],
+   "series": [
+    "ucr_170"
+   ],
+   "_perche": "FIX-170 candidato 1: merge union_recluster (k-FED style) al posto del pooled M-step — mira DRITTO al meccanismo misurato (motivo di minoranza del client p1 diluito dal conteggio). Unit test: dove il pooled finisce a 15.8 da B, UR tiene un codice a 0.000."
+  },
+  "zn_170_sched": {
+   "arms": [
+    "federated_enc_fedavg"
+   ],
+   "series": [
+    "ucr_170"
+   ],
+   "_perche": "FIX-170 candidato 2: --fed-enc-sched cosine contro la DETONAZIONE r21-22 (val ×46, enc_drift 9.46). Da solo probabilmente non basta (l'erosione c'è già a r16), ma isola il contributo della stabilità."
+  },
+  "zn_170_k128": {
+   "arms": [
+    "federated_enc_fedavg"
+   ],
+   "series": [
+    "ucr_170"
+   ],
+   "_perche": "FIX-170 candidato 3: --codebook-size 128 SOLO su 170 — capacità doppia ⇒ i motivi rari tengono codici dedicati anche sotto pooled merge. Cella diagnostica, NON tocca la config del paper (K=64 resta la tabella principale)."
+  }
+ },
+ "_omogeneita_hardware": "Ogni cella deve girare sull'architettura del suo PARTNER, perche' i contrasti sono DENTRO la serie. Il partner di zn_norev e' zn_main/cb_only_ema; quello di zn_a1 e zn_a2 e' zn_enc/enc_fedavg. Su ucr_222 e ucr_229 i due partner stanno su HOST DIVERSI: per questo la stessa serie compare sotto proprietari di host diversi a seconda del tag.",
+ "owners": [
+  {
+   "name": "zn_g2_finish.sh",
+   "host": "g2",
+   "tag": "zn_enc",
+   "series": [
+    "ucr_001",
+    "ucr_011",
+    "ucr_222",
+    "ucr_229"
+   ]
+  },
+  {
+   "name": "zn_branches.sh g2",
+   "host": "g2",
+   "tag": "zn_a1",
+   "series": [
+    "ucr_222"
+   ]
+  },
+  {
+   "name": "zn_branches.sh g2",
+   "host": "g2",
+   "tag": "zn_norev",
+   "series": [
+    "ucr_001",
+    "ucr_011"
+   ]
+  },
+  {
+   "name": "zn_chain.sh g4",
+   "host": "g4",
+   "tag": "zn_main",
+   "series": [
+    "ucr_014",
+    "ucr_043",
+    "ucr_082",
+    "ucr_083",
+    "ucr_086",
+    "ucr_170",
+    "ucr_222",
+    "ucr_229"
+   ]
+  },
+  {
+   "name": "zn_chain.sh g4",
+   "host": "g4",
+   "tag": "zn_enc",
+   "series": [
+    "ucr_014",
+    "ucr_043",
+    "ucr_082",
+    "ucr_083",
+    "ucr_086"
+   ]
+  },
+  {
+   "name": "GIA_FATTE_g2",
+   "host": "g2",
+   "tag": "zn_main",
+   "series": [
+    "ucr_001",
+    "ucr_011"
+   ]
+  },
+  {
+   "name": "zn_g4_fill.sh",
+   "host": "g4",
+   "tag": "zn_norev",
+   "series": [
+    "ucr_229"
+   ]
+  },
+  {
+   "name": "zn_g4_after_chain.sh gpu3",
+   "host": "g4",
+   "tag": "zn_norev",
+   "series": [
+    "ucr_014",
+    "ucr_043"
+   ]
+  },
+  {
+   "name": "zn_a1_rush.sh",
+   "host": "g4",
+   "tag": "zn_a1",
+   "series": [
+    "ucr_001",
+    "ucr_011",
+    "ucr_229"
+   ]
+  },
+  {
+   "name": "zn_a2.sh 0",
+   "host": "g4",
+   "tag": "zn_a2",
+   "series": [
+    "ucr_001",
+    "ucr_011",
+    "ucr_229",
+    "ucr_014",
+    "ucr_043"
+   ]
+  },
+  {
+   "name": "zn_a2.sh 5",
+   "host": "g4",
+   "tag": "zn_a2",
+   "series": [
+    "ucr_082",
+    "ucr_083",
+    "ucr_086",
+    "ucr_222",
+    "ucr_170"
+   ]
+  },
+  {
+   "name": "zn_a1_fill.sh",
+   "host": "g4",
+   "tag": "zn_a1",
+   "series": [
+    "ucr_014",
+    "ucr_043",
+    "ucr_082",
+    "ucr_083",
+    "ucr_086"
+   ],
+   "_perche": "Riempitivo: gli slot delle 3090 si liberano mentre `after_chain a1` aspetta l'uscita di `zn_chain.sh g4` (~03:10). Tutto il ramo A1 di g4 passa di qui. `after_chain a1` resta vivo ma trovera' tutto fatto e dispatchera' zero."
+  },
+  {
+   "name": "zn_ada_tail.sh",
+   "host": "g4",
+   "tag": "zn_enc",
+   "series": [
+    "ucr_170"
+   ]
+  },
+  {
+   "name": "zn_ada_tail.sh",
+   "host": "g4",
+   "tag": "zn_a1",
+   "series": [
+    "ucr_170"
+   ]
+  },
+  {
+   "name": "zn_ada_tail.sh",
+   "host": "g4",
+   "tag": "zn_norev",
+   "series": [
+    "ucr_222"
+   ]
+  },
+  {
+   "name": "zn_budget.sh es",
+   "host": "g4",
+   "tag": "zn_es",
+   "series": [
+    "ucr_001",
+    "ucr_011",
+    "ucr_014",
+    "ucr_170"
+   ]
+  },
+  {
+   "name": "zn_budget.sh ot",
+   "host": "g4",
+   "tag": "zn_ot",
+   "series": [
+    "ucr_001",
+    "ucr_011",
+    "ucr_014",
+    "ucr_043",
+    "ucr_082",
+    "ucr_083",
+    "ucr_086",
+    "ucr_170",
+    "ucr_222",
+    "ucr_229"
+   ]
+  },
+  {
+   "name": "zn_floor_import.py",
+   "host": "g2",
+   "tag": "zn_floor",
+   "series": [
+    "ucr_001",
+    "ucr_011",
+    "ucr_014",
+    "ucr_043",
+    "ucr_083",
+    "ucr_086",
+    "ucr_170",
+    "ucr_222",
+    "ucr_229"
+   ]
+  },
+  {
+   "name": "zn_floor082 (screen g4)",
+   "host": "g4",
+   "tag": "zn_floor",
+   "series": [
+    "ucr_082"
+   ]
+  },
+  {
+   "name": "zn_g2_budget.sh local",
+   "host": "g2",
+   "tag": "zn_es",
+   "series": [
+    "ucr_222",
+    "ucr_229"
+   ]
+  },
+  {
+   "name": "zn_g2_budget.sh centr",
+   "host": "g2",
+   "tag": "zn_es_c",
+   "series": [
+    "ucr_001",
+    "ucr_011",
+    "ucr_014",
+    "ucr_222",
+    "ucr_229"
+   ]
+  },
+  {
+   "name": "zn_s2_gates.sh ctrl",
+   "host": "g4",
+   "tag": "zn_a2s2_ctrl",
+   "series": [
+    "ucr_011",
+    "ucr_014",
+    "ucr_043",
+    "ucr_170"
+   ]
+  },
+  {
+   "name": "zn_s2_gates.sh fedtokcp",
+   "host": "g4",
+   "tag": "zn_fedtokcp",
+   "series": [
+    "ucr_011",
+    "ucr_014",
+    "ucr_043",
+    "ucr_170"
+   ]
+  },
+  {
+   "name": "zn_s2_wave.sh ctrlext",
+   "host": "g4",
+   "tag": "zn_a2s2_ctrl",
+   "series": [
+    "ucr_001",
+    "ucr_083",
+    "ucr_086",
+    "ucr_229"
+   ],
+   "_nota": "2026-08-08: 082 e 222 (le due code non finite quando g4 è morto) passano a zn_g2_requeue.sh."
+  },
+  {
+   "name": "zn_s2_wave.sh tau",
+   "host": "g4",
+   "tag": "zn_a2s2_tau64",
+   "series": [
+    "ucr_011",
+    "ucr_014",
+    "ucr_043",
+    "ucr_170"
+   ]
+  },
+  {
+   "name": "zn_s2_wave.sh tau",
+   "host": "g4",
+   "tag": "zn_a2s2_tau16",
+   "series": [
+    "ucr_011",
+    "ucr_014",
+    "ucr_043",
+    "ucr_170"
+   ]
+  },
+  {
+   "name": "zn_s2_wave.sh tau",
+   "host": "g4",
+   "tag": "zn_a2s2_t64adam",
+   "series": [
+    "ucr_011",
+    "ucr_014",
+    "ucr_043",
+    "ucr_170"
+   ]
+  },
+  {
+   "name": "zn_s2_wave.sh tauext",
+   "host": "g4",
+   "tag": "zn_a2s2_tau64",
+   "series": [
+    "ucr_001",
+    "ucr_082",
+    "ucr_083",
+    "ucr_086",
+    "ucr_222",
+    "ucr_229"
+   ]
+  },
+  {
+   "name": "zn_s2_wave.sh tauext",
+   "host": "g4",
+   "tag": "zn_a2s2_tau16",
+   "series": [
+    "ucr_001",
+    "ucr_082",
+    "ucr_083",
+    "ucr_086",
+    "ucr_222",
+    "ucr_229"
+   ]
+  },
+  {
+   "name": "zn_s2_wave.sh tauext",
+   "host": "g4",
+   "tag": "zn_a2s2_t64adam",
+   "series": [
+    "ucr_001",
+    "ucr_082",
+    "ucr_083",
+    "ucr_086",
+    "ucr_222",
+    "ucr_229"
+   ]
+  },
+  {
+   "name": "zn_s2_prox.sh",
+   "host": "g4",
+   "tag": "zn_a2s2_pmu1",
+   "series": [
+    "ucr_001",
+    "ucr_082",
+    "ucr_083",
+    "ucr_086",
+    "ucr_222",
+    "ucr_229"
+   ],
+   "_nota": "2026-08-08: le 4 serie probe passano a zn_g2_requeue.sh (re-route per morte di g4); a g4 restano le 6 REST."
+  },
+  {
+   "name": "zn_s2_prox.sh",
+   "host": "g4",
+   "tag": "zn_a2s2_pmu3",
+   "series": [
+    "ucr_001",
+    "ucr_082",
+    "ucr_083",
+    "ucr_086",
+    "ucr_222",
+    "ucr_229"
+   ]
+  },
+  {
+   "name": "zn_g2_requeue.sh",
+   "host": "g2",
+   "tag": "zn_a2s2_pmu1",
+   "series": [
+    "ucr_011",
+    "ucr_014",
+    "ucr_043",
+    "ucr_170"
+   ]
+  },
+  {
+   "name": "zn_g2_requeue.sh",
+   "host": "g2",
+   "tag": "zn_a2s2_pmu3",
+   "series": [
+    "ucr_011",
+    "ucr_014",
+    "ucr_043",
+    "ucr_170"
+   ]
+  },
+  {
+   "name": "zn_g2_requeue.sh",
+   "host": "g2",
+   "tag": "zn_a2s2_ctrl",
+   "series": [
+    "ucr_082",
+    "ucr_222"
+   ]
+  },
+  {
+   "name": "zn_g2_requeue.sh",
+   "host": "g2",
+   "tag": "zn_170_ctfp",
+   "series": [
+    "ucr_170"
+   ]
+  },
+  {
+   "name": "zn_g2_requeue.sh",
+   "host": "g2",
+   "tag": "zn_170_ur",
+   "series": [
+    "ucr_170"
+   ]
+  },
+  {
+   "name": "zn_g2_requeue.sh",
+   "host": "g2",
+   "tag": "zn_170_sched",
+   "series": [
+    "ucr_170"
+   ]
+  },
+  {
+   "name": "zn_g2_requeue.sh",
+   "host": "g2",
+   "tag": "zn_170_k128",
+   "series": [
+    "ucr_170"
+   ]
+  }
+ ],
+ "nota": "2026-08-06 01:40: le 6 celle di coda (zn_enc/ucr_170 x4, zn_a1/ucr_170, zn_norev/ucr_222) passano a zn_ada_tail.sh sulle Ada 0+4, rimaste vuote. Slack rispetto al vecchio proprietario: 9-12 h. | 2026-08-06 03:30: aggiunti zn_es / zn_ot / zn_floor. zn_es: `centralized` copre 5 delle 6 serie (su ucr_170 era gia' convergito). zn_ot NON e' ancora lanciato: ha un proprietario dichiarato ma nessun processo. | 03:35: g2 era a 3 job/GPU con MPS attivo (tetto misurato 6-7): 6 slot fermi. Split di zn_es -- GPU5 tiene local 001/011/014/170, g2 prende local 222/229 e TUTTO centralized. Slack ~1 giorno: la catena GPU5 arriva a centralized solo dopo le 6 local."
+}

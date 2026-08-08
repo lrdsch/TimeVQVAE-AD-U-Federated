@@ -1,0 +1,41 @@
+[2026-08-05 03:39 Madrid][gate-A1] aspetto la prima cella A1 (controllo ogni 5 min)
+[2026-08-05 20:29 Madrid][gate-A1] cella scelta: ucr_011  (zn_a1/federated_enc_fedavg/seed0)
+[2026-08-05 20:29 Madrid][gate-A1] sonda D0+D1 in corso (CPU, qualche minuto)...
+
+══════════════════════════════════════════════════════════════════════════════
+  ucr_011  ·  arm=federated_enc_fedavg  ·  seed0  ·  device=cpu
+══════════════════════════════════════════════════════════════════════════════
+  ✗ SALTATO: federated_enc_fedavg ha 0/5 client. Una cella in volo non si sonda.
+[2026-08-05 20:29 Madrid][gate-A1] !! la sonda non ha scritto evidence/latent_probe_ucr_split_w2p_ucr_011_federated_enc_fedavg_seed0.json — gate NON eseguito
+[2026-08-05 20:30 Madrid][gate-A1] aspetto la prima cella A1 (controllo ogni 5 min)
+[2026-08-05 20:32 Madrid][gate-A1] cella scelta: ucr_011  (zn_a1/federated_enc_fedavg_bn-shared/seed0)
+[2026-08-05 20:32 Madrid][gate-A1] sonda D0+D1 in corso (CPU, qualche minuto)...
+
+══════════════════════════════════════════════════════════════════════════════
+  ucr_011  ·  arm=federated_enc_fedavg_bn-shared  ·  seed0  ·  device=cpu
+══════════════════════════════════════════════════════════════════════════════
+  window=182  znorm=zscore  K=64  prior=maskgit_3d_pos
+  [probe] costruzione finestre…
+[data] using pre-built val from disk (1 record(s)); validation_fraction=0.2 is ignored.
+[data] using pre-built val from disk (1 record(s)); validation_fraction=0.2 is ignored.
+[data] using pre-built val from disk (1 record(s)); validation_fraction=0.2 is ignored.
+[data] using pre-built val from disk (1 record(s)); validation_fraction=0.2 is ignored.
+[data] using pre-built val from disk (1 record(s)); validation_fraction=0.2 is ignored.
+  [probe] 384 finestre × 182 campioni (val)
+  [D0] PULITO — i 5 client ricevono finestre identiche: ogni disaccordo di token in D1 è attribuibile SOLO all'encoder.
+  [load] modelli…
+/home/leonardo/PhD/TimeVQVAE-AD-U-Federated/model/prior.py:662: UserWarning: enable_nested_tensor is True, but self.use_nested_tensor is False because encoder_layer.norm_first was True
+  self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=self.depth)
+  [load] latente C=1 F=3 W=22 → L=66 token, K=64
+  [cb] max|Δ| del codebook fra client = 0.00e+00  → indici confrontabili
+  [D1] tokenizzazione + accordo…
+       codici/finestra (mediana)=[23.0, 23.0, 23.0, 23.0, 23.0] su L=66 token, attivi sul corpus=[62, 62, 62, 62, 62]/64
+       kappa=1.000  raw=1.0000  hungarian(held-out)=1.000  jaccard=1.000  tie<0.01=0.006
+  [D1] ENCODER CONCORDANTI (kappa=1.000, accordo grezzo 1.000). La premessa 'latenti diversi' è falsa in questo cluster: il gauge fixing non serve.
+
+  → /home/leonardo/PhD/TimeVQVAE-AD-U-Federated/evidence/latent_probe_zn_a1__ucr_split_w2p_ucr_011_federated_enc_fedavg_bn-shared_seed0.json   (117s)
+
+  ── VERDETTI ──
+   D0: PULITO — i 5 client ricevono finestre identiche: ogni disaccordo di token in D1 è attribuibile SOLO all'encoder.
+   D1: ENCODER CONCORDANTI (kappa=1.000, accordo grezzo 1.000). La premessa 'latenti diversi' è falsa in questo cluster: il gauge fixing non serve.
+[2026-08-05 20:34 Madrid][gate-A1] !! la sonda non ha scritto evidence/latent_probe_ucr_split_w2p_ucr_011_federated_enc_fedavg_bn-shared_seed0.json — gate NON eseguito

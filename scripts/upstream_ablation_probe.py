@@ -178,6 +178,32 @@ VARIANTI: dict[str, dict[str, tuple[object, object]]] = {
     # train-shard]] e il fix dello scaler federato — sparisce per costruzione.
     "znorm": {"dataset.window_normalization": ("zscore", "none")},
 
+    # ─── le tre ablazioni che vale la pena RIFARE sotto z-norm ───────────────
+    # Le undici varianti del mondo "none" sono inservibili per scegliere la configurazione:
+    # sono state prese sotto una rappresentazione mal condizionata, e il 2026-08-03 abbiamo
+    # visto un'interazione enorme (`nostop` da sola -0,357, ma dentro `fidelity` il top-1
+    # torna a 1,00). Solo queste tre hanno un meccanismo per cui la z-norm cambia la risposta:
+    #
+    #   nostop_znorm    era la peggiore (-0,357). Ma sotto z-norm il riferimento si allena
+    #                   gia' a 34 114 step di stadio 2 invece di ~14 000: "allenarsi fino in
+    #                   fondo" non e' piu' la stessa cosa.
+    #   fidprior_znorm  era l'UNICA positiva (+0,050, al limite del rumore +-0,043).
+    #   width4_znorm    senza livello e ampiezza da modellare, un encoder 4x piu' stretto
+    #                   potrebbe bastare — e costa un quarto ad allenare.
+    #
+    # Le altre (ema08, dropout03, fp32, embed64, batch_up) erano dentro il rumore o senza
+    # meccanismo: non si rifanno.
+    "nostop_znorm": {"dataset.window_normalization": ("zscore", "none"),
+                     "training.early_stopping": (False, True),
+                     "training.keep_last_weights": (True, False)},
+    "fidprior_znorm": {"dataset.window_normalization": ("zscore", "none"),
+                       "prior.name":          ("maskgit_upstream", "maskgit_3d_pos"),
+                       "prior.use_rmsnorm":   (True,  False),
+                       "prior.post_emb_norm": (True,  False),
+                       "prior.embed_dim":     (64,    128)},
+    "width4_znorm": {"dataset.window_normalization": ("zscore", "none"),
+                     "encoder.width_base": (4, 16)},
+
     # `fidelity` + la normalizzazione per finestra: la ricetta pubblicata COMPLETA.
     # `znorm` da sola dice se il pezzo mancante basta partendo dai NOSTRI default;
     # questa dice dove arriva il metodo di upstream preso per intero.
