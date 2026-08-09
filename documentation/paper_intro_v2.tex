@@ -1,0 +1,90 @@
+% Introduction — revised 2026-08-09 after the sentence-level fact-check against the data.
+% Every quantitative claim is traceable to a measured contrast on the ucr2p_10 cohort
+% (ucr_split_w2p, W = 2 x period, per-window z-normalisation, seed 0, cluster as the unit of
+% analysis, n = 8 discriminating series of 10). Claims that are bibliographic rather than
+% measured are marked TODO-cite and must be substantiated before submission.
+
+\section{Introduction}
+
+Anomaly detection in time series frequently involves data that is distributed by nature:
+sensors, machines, or organizations each observe their own series and, for reasons of
+confidentiality or ownership, cannot share raw measurements. Each participant is then left
+with a fraction of the data a pooled model would see, and collaboration is valuable for that
+reason alone: in our experiments a model trained on the pooled shards outperforms the average
+shard-local model on all eight discriminating series of our benchmark, and pooling is
+precisely what is prohibited. This scarcity is the regime we study. Each client holds a
+disjoint slice of the same underlying process, so clients differ in \emph{how much} they have
+observed rather than in \emph{what} they observe; cross-client distribution shift is a
+distinct problem and we leave it out of scope. Federated learning (FL) offers the standard
+alternative; to our knowledge, however, federated work on time-series anomaly detection has
+addressed monolithic detectors or continuous-latent generative models.% TODO-cite
+How collaboration should be organized in a discrete generative detector -- a pipeline in
+which a learned tokenizer feeds a prior over discrete codes -- has not, to our knowledge,
+been studied.
+
+We study this question on TimeVQVAE-AD~\citep{lee2024timevqvaead}, a two-stage detector
+reporting state-of-the-art results on the UCR benchmark: a VQ-VAE tokenizer maps
+time-frequency windows to discrete tokens, and a masked (MaskGIT-style) prior scores
+anomalies by the negative log-likelihood it assigns to those tokens. This structure makes
+federation non-trivial in a specific way: the prior is a model of the tokenizer's output, so
+any federated treatment of the prior presupposes that clients speak a common discrete
+vocabulary. We find empirically that they do not. Because each client initialises its own
+codebook, code indices are not comparable across clients by construction, and raw agreement
+sits at chance ($0.014$ against a chance level of $0.016$); the informative measure is
+agreement under the best bijection between indices, and there independently trained
+tokenizers reach only $0.34$ -- far above chance, so the partitions do share structure, but
+far from the identity, leaving a residual disagreement that no relabeling of the codebook
+can close. The consequence is not that sharing the prior is harmful, but that without a
+common vocabulary its effect is \emph{unpredictable}: on some series it helps detection and
+on others it hurts it, by margins that are far from negligible, and on balance nothing is
+gained.
+
+Our central finding is that the obstacle is representation alignment, and that weight
+averaging is what removes it. Federating the encoder aligns client tokenizers essentially
+exactly, at a token resolution roughly twice that of the other federated variants whose
+encoders are trained independently ($1.7$--$2.8\times$ more distinct codes per window),
+though still about $30\%$ below the local and centralized tokenizers; and the alignment
+comes from averaging the weights rather than from a shared initialization: clients that
+start from a common initialization but are never averaged remain as misaligned as
+independent ones. Once a common token space exists, sharing the prior changes from
+unpredictable to consistently beneficial, and the two ingredients only pay off together: the
+same modification of the prior has no net effect on an unaligned backbone, so what alignment
+buys is not a larger effect but a directional one -- an interaction rather than a main
+effect of either stage. The resulting configuration -- federated tokenizer, shared prior
+body with lightweight per-client heads, no exchange of raw series -- is, to our knowledge,
+the first federated adaptation of a discrete tokenizer--prior detector that improves over
+local models trained to convergence under the same stopping rule. The effect is concentrated
+rather than uniform: on three series the gain exceeds the spread we measure across training
+protocols ($+0.30$ to $+0.40$ AUPRC), on one series the \emph{loss} does too ($-0.43$), and
+on the remaining four the two are indistinguishable. It does not close the gap to centralized
+training; we therefore decompose the residual gap, attributing it between the tokenizer and
+the prior stage, and characterize the failure cases, including the series on which the
+federated detector does not recover the local baseline.
+
+All comparisons are paired per series with the client cluster as the unit of analysis, since
+the clients of a cluster share a test set and their scores are strongly correlated. The
+federated arms stop on a validation-driven convergence criterion, every cell halting before
+its round ceiling, whereas the local and centralized baselines stop on a hard step budget in
+about half the cells of the main configuration; we therefore re-run both baselines under a
+raised budget and report both. Results are read against noise thresholds estimated from
+replicate runs and against the sensitivity of each baseline to its own training protocol,
+and are calibrated against a zero-parameter baseline that several federated variants fail to
+beat.
+
+In summary, our contributions are:
+
+\begin{enumerate}
+    \item an empirical decomposition of where to federate a two-stage discrete generative
+    anomaly detector, showing that tokenizer alignment is a necessary precondition and that
+    the collaboration gain arises from sharing the prior once that precondition holds --
+    without it, the same sharing moves detection as much but in inconsistent directions, for
+    no net gain;
+    \item a mechanism analysis showing that encoder weight averaging, and not a shared
+    initialization, is what produces the aligned vocabulary that naive federation lacks, at
+    roughly twice the token resolution of the federated variants that leave encoders local;
+    \item a federated configuration that improves over converged local training on the UCR
+    anomaly benchmark without sharing raw time series, with the magnitude and the extent of
+    the improvement reported per series against measured variability; and
+    \item a diagnostic that separates the remaining tokenizer-side and prior-side gaps to
+    centralized training, indicating where future federated designs should invest.
+\end{enumerate}

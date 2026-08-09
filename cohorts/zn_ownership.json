@@ -293,6 +293,37 @@
     "ucr_170"
    ],
    "_perche": "FIX-170 candidato 3: --codebook-size 128 SOLO su 170 — capacità doppia ⇒ i motivi rari tengono codici dedicati anche sotto pooled merge. Cella diagnostica, NON tocca la config del paper (K=64 resta la tabella principale)."
+  },
+  "zn_170_cbfa": {
+   "arms": [
+    "federated_enc_fedavg"
+   ],
+   "series": [
+    "ucr_170",
+    "ucr_011",
+    "ucr_043"
+   ],
+   "_perche": "FIX-170 candidato 6: A2 con --fed-enc-cb fedavg (dizionario che si MUOVE in locale via EMA + media pesata lato server) invece di suffstat. Combinazione MAI provata: a encoder LOCALE il primitivo vale x20 (fedavg_cb_only 0,338 vs cb_only 0,018) ma non era raggiungibile dal trio; tutte e 4 le celle 170 fallite tenevano il primitivo a suffstat. Flag aperto al trio il 2026-08-08 (una riga in federated_eval.py, guard RVQ gia' presente). ESITO 2026-08-08 22:30 su ucr_170: 0,1709 contro 0,0862 di A2 = ESATTAMENTE il doppio, cambiando SOLO il primitivo del codebook. Estendo a 011/043 per il gate G1 (no-harm). NB il tag dice 170 per ragioni storiche: identifica la VARIANTE, non la serie."
+  },
+  "zn_170_cblocal": {
+   "arms": [
+    "federated_enc_fedavg_cblocal"
+   ],
+   "series": [
+    "ucr_170"
+   ],
+   "_perche": "FIX-170 candidato 7: encoder federato FULL + dizionario LOCALE (--fed-enc-cb local; il guard forza prior local, quindi il contrasto pulito e' contro zn_a1 = stesso tutto ma cb suffstat, 0,0438). Isola il PRIMITIVO DEL CODEBOOK a encoder federato. Motivazione misurata 2026-08-08: su 170 ogni arm col dizionario CONGELATO in locale (suffstat, collect_stats_only=True) sta fra 0,015 e 0,086 -- cb_only 0,018, A1 0,044, A2 0,086, ur 0,065, sched 0,125, k128 0,039 -- mentre entrambi i primitivi in cui il dizionario SI MUOVE in locale stanno a 0,30-0,34 (local 0,303 con dizionario locale, fedavg_cb_only 0,338 con dizionario mediato). Predizione contrastata: la mia storia dice >0,2; il vaglio avversariale dice 0,044-0,125 perche' l'encoder mediato rende i client identici e ogni modello di consenso su 170 sta in quella banda. Esperimento che separa due predizioni opposte. Uso l arm SUFFISSATO federated_enc_fedavg_cblocal (definito, mai girato su nessun dataset): pinna il regime nell id invece che in un flag e produce un out-json distinto da A1/A2."
+  },
+  "zn_cbfa_tau64": {
+   "arms": [
+    "federated_enc_fedavg"
+   ],
+   "series": [
+    "ucr_011",
+    "ucr_043",
+    "ucr_170"
+   ],
+   "_perche": "COMPOSIZIONE cbfa x tau64, 2026-08-09. I due upgrade migliori a oggi sono ORTOGONALI e non erano mai stati combinati: cbfa cambia il MERGE DEL CODEBOOK nello stage 1 (--fed-enc-cb suffstat -> fedavg, dizionario che si muove in locale via EMA + media pesata lato server), tau64 cambia il RITMO DI SINCRONIZZAZIONE dello stage 2 (--tau-steps 64). Stage-1 preso a prestito da zn_170_cbfa via --resume-from, esattamente come zn_a2s2_tau64 lo prende da zn_a2: la cella e' stage-2-only, quindi costa ~1/3 di una run piena. Contrasti pre-registrati (AUPRC media-cluster, seed 0): vs zn_a2s2_tau64 (011 0,902 / 043 0,821 / 170 0,127) isola il contributo di cbfa a tau fisso; vs zn_170_cbfa (011 0,842 / 043 ? / 170 0,171) isola il contributo di tau a merge fisso. Additivita' se il guadagno su 170 supera 0,171 E le money series restano >= 0,84/0,80. ucr_014 NON incluso: cbfa non ha stage-1 la' (costerebbe una run piena) e la serie e' satura (A2 0,939, tau64 0,941, gate misurato +0,00) - da aggiungere solo per completezza di tabella. S1_ROUNDS=0 S2_ROUNDS=300 PATIENCE=6 --fed-s2-patience 29 (~1856 step, come A2 e come tau64)."
   }
  },
  "_omogeneita_hardware": "Ogni cella deve girare sull'architettura del suo PARTNER, perche' i contrasti sono DENTRO la serie. Il partner di zn_norev e' zn_main/cb_only_ema; quello di zn_a1 e zn_a2 e' zn_enc/enc_fedavg. Su ucr_222 e ucr_229 i due partner stanno su HOST DIVERSI: per questo la stessa serie compare sotto proprietari di host diversi a seconda del tag.",
@@ -715,6 +746,34 @@
    "host": "g2",
    "tag": "zn_170_k128",
    "series": [
+    "ucr_170"
+   ]
+  },
+  {
+   "name": "zn_g2_requeue.sh (append 2026-08-08)",
+   "host": "g2",
+   "tag": "zn_170_cbfa",
+   "series": [
+    "ucr_170",
+    "ucr_011",
+    "ucr_043"
+   ]
+  },
+  {
+   "name": "zn_g2_requeue.sh (append 2026-08-08)",
+   "host": "g2",
+   "tag": "zn_170_cblocal",
+   "series": [
+    "ucr_170"
+   ]
+  },
+  {
+   "name": "zn_cbfa_tau64.sh",
+   "host": "g2",
+   "tag": "zn_cbfa_tau64",
+   "series": [
+    "ucr_011",
+    "ucr_043",
     "ucr_170"
    ]
   }

@@ -1505,7 +1505,7 @@ def main() -> int:
                         "statistics too, POOLED by the law of total variance rather than averaged. "
                         "`num_batches_tracked` stays local in every mode (int64 counter).")
     p.add_argument("--fed-enc-cb", type=str, default="suffstat",
-                   choices=["suffstat", "local", "union_recluster"],
+                   choices=["suffstat", "local", "union_recluster", "fedavg"],
                    help="the VQ CODEBOOK for the trio. 'suffstat' (default) federates it by the "
                         "Prop.1 sufficient-statistic merge; 'local' never federates it at all — "
                         "each client k-means-seeds and EMA-updates its own dictionary exactly as "
@@ -1513,6 +1513,12 @@ def main() -> int:
                         "'union_recluster' = k-FED-style server step: per-client centroids → "
                         "union → farthest-point + weighted Lloyd — preserves minority-client "
                         "motifs the count-pooled M-step dilutes (the ucr_170 fix candidate). "
+                        "'fedavg' = the dictionary MOVES locally (EMA + dead-code expiry) and "
+                        "the server weight-averages it — the primitive of federated_fedavg_cb_only, "
+                        "opened to the trio on 2026-08-08 because at LOCAL encoder it is worth ×20 "
+                        "over suffstat on ucr_170 (0.338 vs 0.018) and had never been combined with "
+                        "a FEDERATED encoder: every failed 170 fix held the primitive at suffstat. "
+                        "Refused on multi-stage RVQ (federates stage 0 only — see federated.py). "
                         "Incompatible with federated_enc_fedproto, whose classes ARE the shared "
                         "codebook indices (see the error message for why).")
     p.add_argument("--fed-patience-rounds", type=int, default=0,
