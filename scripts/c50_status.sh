@@ -12,10 +12,8 @@ for t in c50_local c50_central c50_a2; do
 done
 
 echo "-- celle in esecuzione --"
-ps -eo pid,etime,args --no-headers | grep "[f]ederated_eval.py" | grep "runs/c50_" | \
-  sed -E 's/.*--cluster (ucr_[0-9]+).*runs\/(c50_[a-z0-9]+)\/.*/  \2 \1/' | \
-  paste -d' ' <(ps -eo pid,etime,args --no-headers | grep "[f]ederated_eval.py" | grep "runs/c50_" | awk '{print "  pid",$1,"("$2")"}') - 2>/dev/null \
-  || echo "  (nessuna)"
+pgrep -af "federated_eval.py" | sed -nE 's/.*--cluster (ucr_[0-9]+).*runs\/(c50_[a-z0-9]+)\/.*/  \2 \1/p' | sort -u
+pgrep -af "federated_eval.py" | grep -q "runs/c50_" || echo "  (nessuna)"
 
 echo "-- corsie vive --"
 alive=0

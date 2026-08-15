@@ -1,0 +1,416 @@
+% references.bib — TimeVQVAE-AD federated, workshop paper (IEEEtran)
+%
+% 2026-08-13: entries checked against the dblp API. Four needed correcting:
+%   chang2022maskgit      pages 11315-11325 -> 11305-11315, DOI added
+%   blazquezgarcia*review year 2021 -> 2022, key renamed to match
+%   ainsworth2023gitrebasin  author -> "Srinivasa, Siddhartha S."
+%   lin2020feddf          invented page range removed (NeurIPS has none)
+%
+% 2026-08-14: ALL 28 entries re-verified end to end — every DOI resolved on
+% Crossref, every entry matched against dblp / arXiv / PMLR / MLSys, and the
+% three doubtful author lines read off the publisher PDF itself. Two fixes:
+%   mcmahan2017federated  "Brendan McMahan" -> "H. Brendan McMahan" and
+%                         "Aguera" -> "Ag{\"u}era", both as printed on the
+%                         PMLR v54 title page (dblp drops the H. and the
+%                         umlaut; the paper does not). Now also consistent
+%                         with kairouz2021advances.
+%   paparrizos2022vus     kept as "Elmore, Aaron": dblp's canonical person
+%                         name is "Aaron J. Elmore", but the PVLDB paper and
+%                         ACM's own Crossref deposit both print no middle
+%                         initial. Do NOT "fix" the J. back in.
+% Two forms verified as deliberate and left alone: van2017neural keeps
+% "A{\"a}ron" (the NeurIPS PDF prints "Aaron", but IEEEtran abbreviates it to
+% "A." either way, so nothing is visible), and li2020fedprox keeps pages
+% 429-450 (absent from dblp, confirmed by the MLSys proceedings metadata).
+%
+% Page ranges: 20 of the 28 entries carry one and all 20 were confirmed. The
+% other 8 have none by right — 5 ICLR/OpenReview, 2 arXiv, 1 NeurIPS 2020.
+%
+% Style: \bibliographystyle{IEEEtran} + \bibliography{references}
+% NOTE: acronyms are braced so they survive a change of .bst.
+% NOTE: IEEEtran.bst declares no "doi" field (only "url"), so the DOIs below
+% are never printed. They are kept as metadata and to survive a change of
+% .bst; adding "url = {...}" instead WOULD print them, at a cost measured at
+% one extra page.
+
+% =====================================================================
+% Federated learning — foundations and aggregation
+% =====================================================================
+
+@inproceedings{mcmahan2017federated,
+  author    = {McMahan, H. Brendan and Moore, Eider and Ramage, Daniel and
+               Hampson, Seth and Ag{\"u}era y Arcas, Blaise},
+  title     = {Communication-Efficient Learning of Deep Networks from
+               Decentralized Data},
+  booktitle = {Proceedings of the 20th International Conference on Artificial
+               Intelligence and Statistics ({AISTATS})},
+  series    = {Proceedings of Machine Learning Research},
+  volume    = {54},
+  pages     = {1273--1282},
+  publisher = {PMLR},
+  year      = {2017}
+}
+
+@inproceedings{li2020fedprox,
+  author    = {Li, Tian and Sahu, Anit Kumar and Zaheer, Manzil and
+               Sanjabi, Maziar and Talwalkar, Ameet and Smith, Virginia},
+  title     = {Federated Optimization in Heterogeneous Networks},
+  booktitle = {Proceedings of Machine Learning and Systems ({MLSys})},
+  volume    = {2},
+  pages     = {429--450},
+  year      = {2020}
+}
+
+@inproceedings{wang2020fedma,
+  author    = {Wang, Hongyi and Yurochkin, Mikhail and Sun, Yuekai and
+               Papailiopoulos, Dimitris and Khazaeni, Yasaman},
+  title     = {Federated Learning with Matched Averaging},
+  booktitle = {International Conference on Learning Representations ({ICLR})},
+  year      = {2020}
+}
+
+% =====================================================================
+% Federated learning — partial sharing / personalization
+% =====================================================================
+
+@article{arivazhagan2019fedper,
+  author  = {Arivazhagan, Manoj Ghuhan and Aggarwal, Vinay and
+             Singh, Aaditya Kumar and Choudhary, Sunav},
+  title   = {Federated Learning with Personalization Layers},
+  journal = {arXiv preprint arXiv:1912.00818},
+  year    = {2019}
+}
+
+@inproceedings{collins2021fedrep,
+  author    = {Collins, Liam and Hassani, Hamed and Mokhtari, Aryan and
+               Shakkottai, Sanjay},
+  title     = {Exploiting Shared Representations for Personalized Federated
+               Learning},
+  booktitle = {Proceedings of the 38th International Conference on Machine
+               Learning ({ICML})},
+  series    = {Proceedings of Machine Learning Research},
+  volume    = {139},
+  pages     = {2089--2099},
+  publisher = {PMLR},
+  year      = {2021}
+}
+
+@article{liang2020lgfedavg,
+  author  = {Liang, Paul Pu and Liu, Terrance and Ziyin, Liu and
+             Allen, Nicholas B. and Auerbach, Randy P. and Brent, David and
+             Salakhutdinov, Ruslan and Morency, Louis-Philippe},
+  title   = {Think Locally, Act Globally: Federated Learning with Local and
+             Global Representations},
+  journal = {arXiv preprint arXiv:2001.01523},
+  year    = {2020}
+}
+
+% =====================================================================
+% Federated time-series anomaly detection
+% =====================================================================
+
+@inproceedings{zhu2022fedexdnn,
+  author    = {Zhu, Wei and Song, Dongjin and Chen, Yuncong and Cheng, Wei and
+               Zong, Bo and Mizoguchi, Takehiko and Lumezanu, Cristian and
+               Chen, Haifeng and Luo, Jiebo},
+  title     = {Deep Federated Anomaly Detection for Multivariate Time Series
+               Data},
+  booktitle = {2022 {IEEE} International Conference on Big Data (Big Data)},
+  pages     = {1--10},
+  publisher = {IEEE},
+  year      = {2022},
+  doi       = {10.1109/BigData55660.2022.10064694}
+}
+
+@inproceedings{xu2024pefad,
+  author    = {Xu, Ronghui and Miao, Hao and Wang, Senzhang and Yu, Philip S.
+               and Wang, Jianxin},
+  title     = {{PeFAD}: A Parameter-Efficient Federated Framework for Time
+               Series Anomaly Detection},
+  booktitle = {Proceedings of the 30th {ACM} {SIGKDD} Conference on Knowledge
+               Discovery and Data Mining ({KDD})},
+  pages     = {3621--3632},
+  publisher = {ACM},
+  year      = {2024},
+  doi       = {10.1145/3637528.3671753}
+}
+
+% =====================================================================
+% VQ-VAE and discrete tokenization of time series
+% =====================================================================
+
+@inproceedings{van2017neural,
+  author    = {van den Oord, A{\"a}ron and Vinyals, Oriol and
+               Kavukcuoglu, Koray},
+  title     = {Neural Discrete Representation Learning},
+  booktitle = {Advances in Neural Information Processing Systems ({NeurIPS})},
+  volume    = {30},
+  pages     = {6306--6315},
+  year      = {2017}
+}
+
+@inproceedings{lee2023timevqvae,
+  author    = {Lee, Daesoo and Malacarne, Sara and Aune, Erlend},
+  title     = {Vector Quantized Time Series Generation with a Bidirectional
+               Prior Model},
+  booktitle = {Proceedings of the 26th International Conference on Artificial
+               Intelligence and Statistics ({AISTATS})},
+  series    = {Proceedings of Machine Learning Research},
+  volume    = {206},
+  pages     = {7665--7693},
+  publisher = {PMLR},
+  year      = {2023}
+}
+
+@article{lee2024timevqvaead,
+  author  = {Lee, Daesoo and Malacarne, Sara and Aune, Erlend},
+  title   = {Explainable Time Series Anomaly Detection using Masked Latent
+             Generative Modeling},
+  journal = {Pattern Recognition},
+  volume  = {156},
+  pages   = {110826},
+  year    = {2024},
+  doi     = {10.1016/j.patcog.2024.110826}
+}
+
+% =====================================================================
+% Federated sharing of representations, centroids and prototypes
+% =====================================================================
+
+@inproceedings{dennis2021kfed,
+  author    = {Dennis, Don Kurian and Li, Tian and Smith, Virginia},
+  title     = {Heterogeneity for the Win: One-Shot Federated Clustering},
+  booktitle = {Proceedings of the 38th International Conference on Machine
+               Learning ({ICML})},
+  series    = {Proceedings of Machine Learning Research},
+  volume    = {139},
+  pages     = {2611--2620},
+  publisher = {PMLR},
+  year      = {2021}
+}
+
+@inproceedings{tan2022fedproto,
+  author    = {Tan, Yue and Long, Guodong and Liu, Lu and Zhou, Tianyi and
+               Lu, Qinghua and Jiang, Jing and Zhang, Chengqi},
+  title     = {{FedProto}: Federated Prototype Learning across Heterogeneous
+               Clients},
+  booktitle = {Proceedings of the {AAAI} Conference on Artificial
+               Intelligence},
+  volume    = {36},
+  number    = {8},
+  pages     = {8432--8440},
+  year      = {2022}
+}
+
+@inproceedings{lubana2022orchestra,
+  author    = {Lubana, Ekdeep Singh and Tang, Chi Ian and Kawsar, Fahim and
+               Dick, Robert P. and Mathur, Akhil},
+  title     = {{Orchestra}: Unsupervised Federated Learning via Globally
+               Consistent Clustering},
+  booktitle = {Proceedings of the 39th International Conference on Machine
+               Learning ({ICML})},
+  series    = {Proceedings of Machine Learning Research},
+  volume    = {162},
+  pages     = {14461--14484},
+  publisher = {PMLR},
+  year      = {2022}
+}
+
+% =====================================================================
+% Benchmark and metrics. Both are cited now: wu2023ucr is the archive and
+% its protocol, paparrizos2022vus is cited in the metrics subsection as the
+% family of range-aware measures we do NOT report (not aggregable across
+% series), so do not drop it as unused.
+% =====================================================================
+
+@article{wu2023ucr,
+  author  = {Wu, Renjie and Keogh, Eamonn J.},
+  title   = {Current Time Series Anomaly Detection Benchmarks are Flawed and
+             are Creating the Illusion of Progress},
+  journal = {IEEE Transactions on Knowledge and Data Engineering},
+  volume  = {35},
+  number  = {3},
+  pages   = {2421--2429},
+  year    = {2023},
+  doi     = {10.1109/TKDE.2021.3112126}
+}
+
+@article{paparrizos2022vus,
+  author  = {Paparrizos, John and Boniol, Paul and Palpanas, Themis and
+             Tsay, Ruey S. and Elmore, Aaron and Franklin, Michael J.},
+  title   = {Volume Under the Surface: A New Accuracy Evaluation Measure for
+             Time-Series Anomaly Detection},
+  journal = {Proceedings of the VLDB Endowment},
+  volume  = {15},
+  number  = {11},
+  pages   = {2774--2787},
+  year    = {2022},
+  doi     = {10.14778/3551793.3551830}
+}
+
+% #####################################################################
+% ADDED 2026-08-10 — verified 2026-08-13 (dblp) and 2026-08-14 (Crossref).
+% The marker is kept only to date the entries; it is no longer a warning.
+% #####################################################################
+
+% =====================================================================
+% Masked generative modeling (the prior of TimeVQVAE / TimeVQVAE-AD)
+% Cited in the Background section.
+% =====================================================================
+
+@inproceedings{chang2022maskgit,
+  author    = {Chang, Huiwen and Zhang, Han and Jiang, Lu and Liu, Ce and
+               Freeman, William T.},
+  title     = {{MaskGIT}: Masked Generative Image Transformer},
+  booktitle = {Proceedings of the {IEEE/CVF} Conference on Computer Vision and
+               Pattern Recognition ({CVPR})},
+  pages     = {11305--11315},
+  year      = {2022},
+  doi       = {10.1109/CVPR52688.2022.01103}
+}
+
+% =====================================================================
+% Time-series anomaly detection — surveys / evaluations
+% Cited in the opening sentence of the Introduction.
+% =====================================================================
+
+% dblp assigns this to the April 2022 issue of CSUR (the DOI went online in
+% 2021); many bibliographies cite it as 2021. We follow dblp — do not "fix" back.
+@article{blazquezgarcia2022review,
+  author  = {Bl{\'a}zquez-Garc{\'i}a, Ane and Conde, Angel and Mori, Usue and
+             Lozano, Jose A.},
+  title   = {A Review on Outlier/Anomaly Detection in Time Series Data},
+  journal = {ACM Computing Surveys},
+  volume  = {54},
+  number  = {3},
+  pages   = {56:1--56:33},
+  year    = {2022},
+  doi     = {10.1145/3444690}
+}
+
+@article{schmidl2022anomaly,
+  author  = {Schmidl, Sebastian and Wenig, Phillip and Papenbrock, Thorsten},
+  title   = {Anomaly Detection in Time Series: A Comprehensive Evaluation},
+  journal = {Proceedings of the VLDB Endowment},
+  volume  = {15},
+  number  = {9},
+  pages   = {1779--1797},
+  year    = {2022},
+  doi     = {10.14778/3538598.3538602}
+}
+
+% =====================================================================
+% Federated learning — server-side optimization and normalization layers
+% FedOpt covers the multi-step stage-2 server update (tau); FedBN is the
+% opposite of our choice on BN statistics (they keep them local, we pool).
+% =====================================================================
+
+@inproceedings{reddi2021adaptive,
+  author    = {Reddi, Sashank J. and Charles, Zachary and Zaheer, Manzil and
+               Garrett, Zachary and Rush, Keith and Kone{\v{c}}n{\'y}, Jakub
+               and Kumar, Sanjiv and McMahan, H. Brendan},
+  title     = {Adaptive Federated Optimization},
+  booktitle = {International Conference on Learning Representations ({ICLR})},
+  year      = {2021}
+}
+
+@inproceedings{li2021fedbn,
+  author    = {Li, Xiaoxiao and Jiang, Meirui and Zhang, Xiaofei and
+               Kamp, Michael and Dou, Qi},
+  title     = {{FedBN}: Federated Learning on Non-{IID} Features via Local
+               Batch Normalization},
+  booktitle = {International Conference on Learning Representations ({ICLR})},
+  year      = {2021}
+}
+
+@inproceedings{karimireddy2020scaffold,
+  author    = {Karimireddy, Sai Praneeth and Kale, Satyen and Mohri, Mehryar
+               and Reddi, Sashank J. and Stich, Sebastian U. and
+               Suresh, Ananda Theertha},
+  title     = {{SCAFFOLD}: Stochastic Controlled Averaging for Federated
+               Learning},
+  booktitle = {Proceedings of the 37th International Conference on Machine
+               Learning ({ICML})},
+  series    = {Proceedings of Machine Learning Research},
+  volume    = {119},
+  pages     = {5132--5143},
+  publisher = {PMLR},
+  year      = {2020}
+}
+
+@article{kairouz2021advances,
+  author  = {Kairouz, Peter and McMahan, H. Brendan and Avent, Brendan and
+             Bellet, Aur{\'e}lien and Bennis, Mehdi and Bhagoji, Arjun Nitin
+             and others},
+  title   = {Advances and Open Problems in Federated Learning},
+  journal = {Foundations and Trends in Machine Learning},
+  volume  = {14},
+  number  = {1--2},
+  pages   = {1--210},
+  year    = {2021},
+  doi     = {10.1561/2200000083}
+}
+
+% =====================================================================
+% Permutation symmetry of neural networks — why averaging needs a shared
+% "gauge". This is the formal backing of the token-index argument: FedMA
+% already matches units, these two state the symmetry itself.
+% =====================================================================
+
+@inproceedings{entezari2022permutation,
+  author    = {Entezari, Rahim and Sedghi, Hanie and Saukh, Olga and
+               Neyshabur, Behnam},
+  title     = {The Role of Permutation Invariance in Linear Mode Connectivity
+               of Neural Networks},
+  booktitle = {International Conference on Learning Representations ({ICLR})},
+  year      = {2022}
+}
+
+@inproceedings{ainsworth2023gitrebasin,
+  author    = {Ainsworth, Samuel K. and Hayase, Jonathan and
+               Srinivasa, Siddhartha S.},
+  title     = {Git Re-Basin: Merging Models Modulo Permutation Symmetries},
+  booktitle = {International Conference on Learning Representations ({ICLR})},
+  year      = {2023}
+}
+
+% =====================================================================
+% Score fusion / ensembles — backing for contribution 2 (averaging the
+% z-normalized scores of unaggregated local models).
+% =====================================================================
+
+@inproceedings{kriegel2011unifying,
+  author    = {Kriegel, Hans-Peter and Kr{\"o}ger, Peer and Schubert, Erich
+               and Zimek, Arthur},
+  title     = {Interpreting and Unifying Outlier Scores},
+  booktitle = {Proceedings of the 2011 {SIAM} International Conference on Data
+               Mining ({SDM})},
+  pages     = {13--24},
+  publisher = {SIAM},
+  year      = {2011},
+  doi       = {10.1137/1.9781611972818.2}
+}
+
+@article{aggarwal2015outlierensembles,
+  author  = {Aggarwal, Charu C. and Sathe, Saket},
+  title   = {Theoretical Foundations and Algorithms for Outlier Ensembles},
+  journal = {ACM SIGKDD Explorations Newsletter},
+  volume  = {17},
+  number  = {1},
+  pages   = {24--47},
+  year    = {2015},
+  doi     = {10.1145/2830544.2830549}
+}
+
+@inproceedings{lin2020feddf,
+  author    = {Lin, Tao and Kong, Lingjing and Stich, Sebastian U. and
+               Jaggi, Martin},
+  title     = {Ensemble Distillation for Robust Model Fusion in Federated
+               Learning},
+  booktitle = {Advances in Neural Information Processing Systems ({NeurIPS})},
+  volume    = {33},
+  year      = {2020}
+}
+% NB: the NeurIPS 2020 proceedings carry no page numbers; the "2351--2363"
+% range that circulates for this paper is not in the official record. Omitted.
+

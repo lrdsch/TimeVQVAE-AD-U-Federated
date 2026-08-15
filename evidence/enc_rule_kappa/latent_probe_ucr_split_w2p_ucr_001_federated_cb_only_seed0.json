@@ -1,0 +1,265 @@
+{
+  "cluster": "ucr_001",
+  "arm": "federated_cb_only",
+  "seed": 0,
+  "tag": "zn_main",
+  "dataset": "ucr_split_w2p",
+  "run_dir": "/home/leonardo/PhD/TimeVQVAE-AD-U-Federated/artifacts/runs/zn_main",
+  "clients": [
+    "ucr_001_p0",
+    "ucr_001_p1",
+    "ucr_001_p2",
+    "ucr_001_p3",
+    "ucr_001_p4"
+  ],
+  "config": {
+    "window_length": 408,
+    "window_normalization": "zscore",
+    "codebook_size": 64,
+    "prior": "maskgit_3d_pos",
+    "scaling": "per_entity_standard"
+  },
+  "D0": {
+    "reference": "ucr_001_p0",
+    "max_abs_diff_per_client": {
+      "ucr_001_p1": 9.5367431640625e-07,
+      "ucr_001_p2": 1.430511474609375e-06,
+      "ucr_001_p3": 9.5367431640625e-07,
+      "ucr_001_p4": 9.5367431640625e-07
+    },
+    "worst": 1.430511474609375e-06,
+    "inputs_identical": true,
+    "verdict": "PULITO \u2014 i 5 client ricevono finestre identiche: ogni disaccordo di token in D1 \u00e8 attribuibile SOLO all'encoder."
+  },
+  "codebook_max_delta_across_clients": 0.0,
+  "D1": {
+    "codebook_max_delta": 0.0,
+    "cross_client_interpretable": true,
+    "codebook_usage": {
+      "ucr_001_p0": {
+        "active_codes_corpus": 29,
+        "perplexity_corpus": 8.842433895838685,
+        "top1_share": 0.44524305555555554,
+        "tokens_per_window": 75,
+        "distinct_codes_per_window_mean": 16.348958333333332,
+        "distinct_codes_per_window_median": 17.0,
+        "distinct_codes_per_window_p10": 14.0,
+        "distinct_codes_per_window_p90": 19.0,
+        "effective_codes_per_window_median": 7.6825213254397955
+      },
+      "ucr_001_p1": {
+        "active_codes_corpus": 21,
+        "perplexity_corpus": 7.611444793069684,
+        "top1_share": 0.45819444444444446,
+        "tokens_per_window": 75,
+        "distinct_codes_per_window_mean": 13.8203125,
+        "distinct_codes_per_window_median": 14.0,
+        "distinct_codes_per_window_p10": 12.0,
+        "distinct_codes_per_window_p90": 15.0,
+        "effective_codes_per_window_median": 6.790310539717224
+      },
+      "ucr_001_p2": {
+        "active_codes_corpus": 17,
+        "perplexity_corpus": 5.6968721628343815,
+        "top1_share": 0.4657291666666667,
+        "tokens_per_window": 75,
+        "distinct_codes_per_window_mean": 10.075520833333334,
+        "distinct_codes_per_window_median": 10.0,
+        "distinct_codes_per_window_p10": 9.0,
+        "distinct_codes_per_window_p90": 11.0,
+        "effective_codes_per_window_median": 5.294805391367054
+      },
+      "ucr_001_p3": {
+        "active_codes_corpus": 26,
+        "perplexity_corpus": 8.688651934951483,
+        "top1_share": 0.4105902777777778,
+        "tokens_per_window": 75,
+        "distinct_codes_per_window_mean": 14.427083333333334,
+        "distinct_codes_per_window_median": 14.0,
+        "distinct_codes_per_window_p10": 13.0,
+        "distinct_codes_per_window_p90": 16.0,
+        "effective_codes_per_window_median": 7.675365014600398
+      },
+      "ucr_001_p4": {
+        "active_codes_corpus": 26,
+        "perplexity_corpus": 8.545203969386138,
+        "top1_share": 0.46368055555555554,
+        "tokens_per_window": 75,
+        "distinct_codes_per_window_mean": 16.096354166666668,
+        "distinct_codes_per_window_median": 16.0,
+        "distinct_codes_per_window_p10": 14.0,
+        "distinct_codes_per_window_p90": 18.0,
+        "effective_codes_per_window_median": 7.529745181500587
+      }
+    },
+    "median_distinct_codes_per_window": 14.0,
+    "pairs": {
+      "ucr_001_p0|ucr_001_p1": {
+        "agree_raw": 0.5317708333333333,
+        "p_chance": 0.23268998842592595,
+        "kappa": 0.38977836910255786,
+        "agree_hungarian_fit": 0.5569444444444445,
+        "agree_hungarian_heldout": 0.5529166666666666,
+        "support_jaccard": 0.5151515151515151,
+        "support_intersection": 17,
+        "js_marginal": 0.057741196816312276,
+        "agree_by_freq": [
+          0.26375,
+          0.3413541666666667,
+          0.9902083333333334
+        ]
+      },
+      "ucr_001_p0|ucr_001_p2": {
+        "agree_raw": 0.0,
+        "p_chance": 0.0,
+        "kappa": 0.0,
+        "agree_hungarian_fit": 0.54375,
+        "agree_hungarian_heldout": 0.5453472222222222,
+        "support_jaccard": 0.0,
+        "support_intersection": 0,
+        "js_marginal": 0.6931471805599454,
+        "agree_by_freq": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "ucr_001_p0|ucr_001_p3": {
+        "agree_raw": 0.035034722222222224,
+        "p_chance": 0.0685457404996142,
+        "kappa": -0.03597709488747912,
+        "agree_hungarian_fit": 0.5145833333333333,
+        "agree_hungarian_heldout": 0.49618055555555557,
+        "support_jaccard": 0.34146341463414637,
+        "support_intersection": 14,
+        "js_marginal": 0.26365202425453627,
+        "agree_by_freq": [
+          0.04125,
+          0.06385416666666667,
+          0.0
+        ]
+      },
+      "ucr_001_p0|ucr_001_p4": {
+        "agree_raw": 0.09701388888888889,
+        "p_chance": 0.05800323832947531,
+        "kappa": 0.041412722576914814,
+        "agree_hungarian_fit": 0.47034722222222225,
+        "agree_hungarian_heldout": 0.45743055555555556,
+        "support_jaccard": 0.34146341463414637,
+        "support_intersection": 14,
+        "js_marginal": 0.3046218105068602,
+        "agree_by_freq": [
+          0.10645833333333334,
+          0.18458333333333332,
+          0.0
+        ]
+      },
+      "ucr_001_p1|ucr_001_p2": {
+        "agree_raw": 6.944444444444444e-05,
+        "p_chance": 0.005126255063657407,
+        "kappa": -0.0050828666903221225,
+        "agree_hungarian_fit": 0.5246527777777777,
+        "agree_hungarian_heldout": 0.5240277777777778,
+        "support_jaccard": 0.02702702702702703,
+        "support_intersection": 1,
+        "js_marginal": 0.6669682486093957,
+        "agree_by_freq": [
+          0.00020833333333333335,
+          0.0,
+          0.0
+        ]
+      },
+      "ucr_001_p1|ucr_001_p3": {
+        "agree_raw": 0.043472222222222225,
+        "p_chance": 0.07190312138310186,
+        "kappa": -0.030633546794434807,
+        "agree_hungarian_fit": 0.4855555555555556,
+        "agree_hungarian_heldout": 0.49756944444444445,
+        "support_jaccard": 0.42424242424242425,
+        "support_intersection": 14,
+        "js_marginal": 0.2362803934263561,
+        "agree_by_freq": [
+          0.05291666666666667,
+          0.0775,
+          0.0
+        ]
+      },
+      "ucr_001_p1|ucr_001_p4": {
+        "agree_raw": 0.09986111111111111,
+        "p_chance": 0.061571433738425926,
+        "kappa": 0.0408019094359202,
+        "agree_hungarian_fit": 0.48819444444444443,
+        "agree_hungarian_heldout": 0.46444444444444444,
+        "support_jaccard": 0.5161290322580645,
+        "support_intersection": 16,
+        "js_marginal": 0.2824610283401197,
+        "agree_by_freq": [
+          0.10760416666666667,
+          0.19197916666666667,
+          0.0
+        ]
+      },
+      "ucr_001_p2|ucr_001_p3": {
+        "agree_raw": 0.0012152777777777778,
+        "p_chance": 0.00829377170138889,
+        "kappa": -0.007137692314139342,
+        "agree_hungarian_fit": 0.5281944444444444,
+        "agree_hungarian_heldout": 0.5079861111111111,
+        "support_jaccard": 0.13157894736842105,
+        "support_intersection": 5,
+        "js_marginal": 0.6163751578851218,
+        "agree_by_freq": [
+          0.0028125,
+          0.0008333333333333334,
+          0.0
+        ]
+      },
+      "ucr_001_p2|ucr_001_p4": {
+        "agree_raw": 0.0028472222222222223,
+        "p_chance": 0.0017350465374228392,
+        "kappa": 0.0011141087152681218,
+        "agree_hungarian_fit": 0.4834027777777778,
+        "agree_hungarian_heldout": 0.4654861111111111,
+        "support_jaccard": 0.04878048780487805,
+        "support_intersection": 2,
+        "js_marginal": 0.6716334715961751,
+        "agree_by_freq": [
+          0.008541666666666666,
+          0.0,
+          0.0
+        ]
+      },
+      "ucr_001_p3|ucr_001_p4": {
+        "agree_raw": 0.04527777777777778,
+        "p_chance": 0.08449714023919752,
+        "kappa": -0.042839147953799686,
+        "agree_hungarian_fit": 0.5030555555555556,
+        "agree_hungarian_heldout": 0.4925,
+        "support_jaccard": 0.40540540540540543,
+        "support_intersection": 15,
+        "js_marginal": 0.22479219089271918,
+        "agree_by_freq": [
+          0.051875,
+          0.08375,
+          0.00020833333333333335
+        ]
+      }
+    },
+    "mean_kappa": 0.035143676119048596,
+    "mean_agree_raw": 0.08565624999999999,
+    "mean_agree_hungarian_heldout": 0.5003888888888889,
+    "mean_support_jaccard": 0.2751241668526028,
+    "mean_hungarian_gain": 0.4147326388888889,
+    "tie_margin": {
+      "median": 0.920386552810669,
+      "frac_below_0.01": 0.0034305555555555556,
+      "frac_below_0.05": 0.016951388888888887
+    },
+    "verdict": "PERMUTAZIONE FUNZIONALE (accordo grezzo 0.086 \u2192 0.500 dopo la migliore rietichettatura held-out, +0.415; kappa 0.035). Gli encoder inducono in buona parte la STESSA partizione con etichette diverse: una rietichettatura dei token esiste ed \u00e8 un intervento economico."
+  },
+  "elapsed_s": 15.3,
+  "D_computed": [
+    "d0",
+    "d1"
+  ]
+}

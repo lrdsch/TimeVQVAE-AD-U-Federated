@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Template di stile per figura-framework, misurato da ClusteringFramework.png (MLISE).
+  Vedi STYLE.md per la provenienza di ogni numero.
+
+  Canvas: 900 x 1200 unita' = 3.5 x 4.67 pollici alla resa in colonna IEEE.
+  A quella scala 1 unita' = 1/257 di pollice, quindi il tratto uniforme da ~1 pt vale 3.6 unita'.
+
+  Apri in Inkscape, duplica le primitive, componi. Non cambiare stroke-width ne' le alpha:
+  sono la firma dello stile.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="1200"
+     viewBox="0 0 900 1200" font-family="URW Bookman, Bookman Old Style, Bookman, serif">
+
+  <defs>
+    <!-- punta di freccia barbata (concava sul retro), stile marker Inkscape Arrow2 -->
+    <marker id="barb" viewBox="0 0 12 12" refX="10.5" refY="6"
+            markerWidth="5" markerHeight="5" orient="auto-start-reverse" markerUnits="strokeWidth">
+      <path d="M 0,0 L 12,6 L 0,12 L 3.2,6 Z" fill="#000000"/>
+    </marker>
+
+    <style>
+      /* ---- tratto: UNIFORME a qualunque dimensione dell'elemento ---- */
+      .edge   { stroke:#000000; stroke-width:3.6; fill:none;
+                stroke-linejoin:round; stroke-linecap:round; }
+      .shape  { stroke:#000000; stroke-width:3.6; stroke-linejoin:round; }
+      .arrow  { stroke:#000000; stroke-width:3.6; fill:none;
+                stroke-linecap:round; marker-end:url(#barb); }
+
+      /* ---- riempimenti: colori PURI con opacita' abbassata (tre soli livelli) ---- */
+      .stage-a  { fill:#FF8029; fill-opacity:0.19; stroke:none; }   /* sfondo stage 1 */
+      .stage-b  { fill:#FFFF00; fill-opacity:0.19; stroke:none; }   /* sfondo stage 2 */
+      .panel    { fill:#71CEDC; fill-opacity:0.59; }                /* pannello in evidenza */
+      .panel-2  { fill:#71E2D5; fill-opacity:0.59; }                /* box decoder */
+      .encoder  { fill:#FF9A9A; fill-opacity:0.49; }                /* trapezio encoder */
+      .input    { fill:#AEC6FF; fill-opacity:0.49; }                /* box ingresso */
+      .view     { fill:#90EF90; fill-opacity:0.49; }                /* box vista */
+      .inner    { fill:#F9F9FA; fill-opacity:0.99; }                /* interno ellissi */
+
+      /* ---- testo: grassetto corsivo con grazie, pesante ---- */
+      .label    { font-weight:bold; font-style:italic; text-anchor:middle;
+                  dominant-baseline:central; fill:#000000; }
+      .stage-tag{ font-weight:bold; font-style:italic; fill:#000000; font-size:34px; }
+      .loss     { font-weight:bold; font-style:italic; text-anchor:middle;
+                  fill:#000000; font-size:40px; }
+    </style>
+  </defs>
+
+  <!-- ═══ 1. sfondi di stage: rettangoli enormi, arrotondati, SENZA contorno ═══ -->
+  <rect class="stage-a" x="20"  y="640" width="410" height="530" rx="34"/>
+  <rect class="stage-b" x="450" y="640" width="430" height="530" rx="34"/>
+  <text class="stage-tag" x="34"  y="1196">Pretraining Stage</text>
+  <text class="stage-tag" x="640" y="1196">Finetuning Stage</text>
+
+  <!-- ═══ 2. box di ingresso — rx = 35% dell'altezza ═══ -->
+  <rect class="shape input" x="300" y="40" width="300" height="110" rx="38"/>
+  <text class="label" x="450" y="80"  font-size="26">Stochastic Augmentation</text>
+  <text class="label" x="450" y="115" font-size="26">&amp; Random Masking</text>
+
+  <!-- ═══ 3. ventaglio verso N viste ═══ -->
+  <path class="arrow" d="M 420,150 C 380,190 240,190 165,215"/>
+  <path class="arrow" d="M 450,150 L 450,215"/>
+  <path class="arrow" d="M 480,150 C 520,190 660,190 735,215"/>
+
+  <rect class="shape view" x="100" y="220" width="130" height="62" rx="22"/>
+  <text class="label" x="165" y="252" font-size="26">View 1</text>
+  <rect class="shape view" x="385" y="220" width="130" height="62" rx="22"/>
+  <text class="label" x="450" y="252" font-size="26">View 2</text>
+  <rect class="shape view" x="670" y="220" width="130" height="62" rx="22"/>
+  <text class="label" x="735" y="252" font-size="26">View N</text>
+  <text class="label" x="590" y="252" font-size="40">· · ·</text>
+
+  <!-- ═══ 4. encoder: trapezio rastremato verso il basso ═══ -->
+  <path class="arrow" d="M 165,282 L 165,330"/>
+  <path class="arrow" d="M 450,282 L 450,330"/>
+  <path class="arrow" d="M 735,282 L 735,330"/>
+
+  <path class="shape encoder" d="M 95,335 L 235,335 L 212,425 L 118,425 Z"/>
+  <text class="label" x="165" y="368" font-size="24">Mamba</text>
+  <text class="label" x="165" y="396" font-size="24">Encoder</text>
+  <path class="shape encoder" d="M 380,335 L 520,335 L 497,425 L 403,425 Z"/>
+  <text class="label" x="450" y="368" font-size="24">Mamba</text>
+  <text class="label" x="450" y="396" font-size="24">Encoder</text>
+  <path class="shape encoder" d="M 665,335 L 805,335 L 782,425 L 688,425 Z"/>
+  <text class="label" x="735" y="368" font-size="24">Mamba</text>
+  <text class="label" x="735" y="396" font-size="24">Encoder</text>
+
+  <!-- ═══ 5. rappresentazioni ═══ -->
+  <path class="arrow" d="M 165,425 L 165,478"/>
+  <path class="arrow" d="M 450,425 L 450,478"/>
+  <path class="arrow" d="M 735,425 L 735,478"/>
+  <text class="label" x="165" y="505" font-size="46">z₁</text>
+  <text class="label" x="450" y="505" font-size="46">z₂</text>
+  <text class="label" x="735" y="505" font-size="46">z_N</text>
+  <text class="label" x="592" y="505" font-size="40">· · ·</text>
+
+  <!-- ═══ 6. pannello in evidenza, con ellisse-contenitore «Before / After» ═══ -->
+  <rect class="shape panel" x="42" y="665" width="240" height="330" rx="26"/>
+  <ellipse class="shape inner" cx="162" cy="800" rx="98" ry="105"/>
+  <text class="label" x="162" y="712" font-size="20">Before</text>
+  <path class="edge" d="M 78,800 L 246,800" stroke-dasharray="12 9"/>
+  <text class="label" x="162" y="890" font-size="20">After</text>
+  <text class="label" x="162" y="968" font-size="24">Instance level</text>
+
+  <!-- ═══ 7. box decoder ═══ -->
+  <rect class="shape panel-2" x="320" y="700" width="185" height="95" rx="33"/>
+  <text class="label" x="412" y="732" font-size="23">Cross − view</text>
+  <text class="label" x="412" y="763" font-size="23">Decoders</text>
+
+  <!-- ═══ 8. nodi di loss: terminali, in grande ═══ -->
+  <text class="loss" x="300" y="1090">ℒ_cross</text>
+  <text class="loss" x="660" y="1090">ℒ_final</text>
+  <path class="arrow" d="M 412,795 C 400,880 340,990 305,1055"/>
+  <path class="arrow" d="M 162,995 C 200,1030 250,1060 268,1075"/>
+</svg>

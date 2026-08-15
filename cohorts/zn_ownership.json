@@ -324,6 +324,17 @@
     "ucr_170"
    ],
    "_perche": "COMPOSIZIONE cbfa x tau64, 2026-08-09. I due upgrade migliori a oggi sono ORTOGONALI e non erano mai stati combinati: cbfa cambia il MERGE DEL CODEBOOK nello stage 1 (--fed-enc-cb suffstat -> fedavg, dizionario che si muove in locale via EMA + media pesata lato server), tau64 cambia il RITMO DI SINCRONIZZAZIONE dello stage 2 (--tau-steps 64). Stage-1 preso a prestito da zn_170_cbfa via --resume-from, esattamente come zn_a2s2_tau64 lo prende da zn_a2: la cella e' stage-2-only, quindi costa ~1/3 di una run piena. Contrasti pre-registrati (AUPRC media-cluster, seed 0): vs zn_a2s2_tau64 (011 0,902 / 043 0,821 / 170 0,127) isola il contributo di cbfa a tau fisso; vs zn_170_cbfa (011 0,842 / 043 ? / 170 0,171) isola il contributo di tau a merge fisso. Additivita' se il guadagno su 170 supera 0,171 E le money series restano >= 0,84/0,80. ucr_014 NON incluso: cbfa non ha stage-1 la' (costerebbe una run piena) e la serie e' satura (A2 0,939, tau64 0,941, gate misurato +0,00) - da aggiungere solo per completezza di tabella. S1_ROUNDS=0 S2_ROUNDS=300 PATIENCE=6 --fed-s2-patience 29 (~1856 step, come A2 e come tau64)."
+  },
+  "zn_a2s2_lep": {
+   "arms": [
+    "federated_enc_fedavg"
+   ],
+   "series": [
+    "ucr_011",
+    "ucr_043",
+    "ucr_170"
+   ],
+   "_perche": "CONTROLLO ritmo-vs-budget per tau64, 2026-08-09. tau64 fa 2,2-3,5x piu' passi locali di A2 prima del suo best (step-patience 29x64=1856 contro 6x10xnb=780/600/1140): le celle attuali non separano il ritmo di sync dal budget. Questo tag e' A2-default con LOCAL_EPOCHS alzato per serie cosi' che la step-patience PAREGGI tau64: 011 E=24 (6x24x13=1872), 043 E=31 (6x31x10=1860), 170 E=16 (6x16x19=1824). NB alzare le epoche rende il sync PIU' RARO, direzione opposta a tau64 (64 passi = mezza epoca): se lep~tau64 il merito era il budget/patience; se lep~A2 e tau64 sopra entrambi, la leva e' il ritmo frequente. Stage-2-only, resume da zn_a2, --fed-s2-val fixed come tutta la famiglia zn_a2s2_*. ucr_014 esclusa: satura (0,939/0,941), non discrimina."
   }
  },
  "_omogeneita_hardware": "Ogni cella deve girare sull'architettura del suo PARTNER, perche' i contrasti sono DENTRO la serie. Il partner di zn_norev e' zn_main/cb_only_ema; quello di zn_a1 e zn_a2 e' zn_enc/enc_fedavg. Su ucr_222 e ucr_229 i due partner stanno su HOST DIVERSI: per questo la stessa serie compare sotto proprietari di host diversi a seconda del tag.",
@@ -771,6 +782,16 @@
    "name": "zn_cbfa_tau64.sh",
    "host": "g2",
    "tag": "zn_cbfa_tau64",
+   "series": [
+    "ucr_011",
+    "ucr_043",
+    "ucr_170"
+   ]
+  },
+  {
+   "name": "zn_after_tauext_g2.sh",
+   "host": "g2",
+   "tag": "zn_a2s2_lep",
    "series": [
     "ucr_011",
     "ucr_043",

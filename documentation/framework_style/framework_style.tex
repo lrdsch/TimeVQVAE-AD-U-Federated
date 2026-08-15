@@ -1,0 +1,95 @@
+% ═══════════════════════════════════════════════════════════════════════════════
+%  Stile TikZ che riproduce il linguaggio visivo della figura-framework MLISE.
+%  Ogni valore viene da una misura su ClusteringFramework.png — vedi STYLE.md.
+%
+%  Alternativa vettoriale al PNG da 6,36 MB: il testo usa i font del documento,
+%  la figura resta editabile e pesa qualche kB.
+%
+%  Uso nel preambolo (IEEEtran conference, come il tuo paper.tex):
+%      \usepackage{tikz}
+%      \usetikzlibrary{arrows.meta, shapes.geometric, positioning, fit, backgrounds}
+%      \input{framework_style}
+%
+%  ⚠️ NON COMPILATO: sulla macchina dove è stato scritto non c'è pdflatex.
+%     Compilalo una volta prima di fidartene.
+% ═══════════════════════════════════════════════════════════════════════════════
+
+% ── 1. palette: colori PURI, l'effetto pastello lo fa l'opacità ────────────────
+\definecolor{fwStageA}{HTML}{FF8029}   % sfondo stage 1   (opacità 0.19)
+\definecolor{fwStageB}{HTML}{FFFF00}   % sfondo stage 2   (opacità 0.19)
+\definecolor{fwPanel} {HTML}{71CEDC}   % pannello         (opacità 0.59)
+\definecolor{fwPanelB}{HTML}{71E2D5}   % box decoder      (opacità 0.59)
+\definecolor{fwEnc}   {HTML}{FF9A9A}   % encoder          (opacità 0.49)
+\definecolor{fwInput} {HTML}{AEC6FF}   % ingresso         (opacità 0.49)
+\definecolor{fwView}  {HTML}{90EF90}   % vista            (opacità 0.49)
+\definecolor{fwInner} {HTML}{F9F9FA}   % interno ellissi
+% accenti pieni per le illustrazioni interne
+\definecolor{fwBlue}  {HTML}{4567A9}
+\definecolor{fwOrange}{HTML}{D17920}
+\definecolor{fwGreen} {HTML}{2B7B4F}
+\definecolor{fwPurple}{HTML}{7B3A99}
+\definecolor{fwRed}   {HTML}{B0302F}
+
+% ── 2. tipografia: pesante, corsiva, con grazie ───────────────────────────────
+% pbk = URW Bookman nella nomenclatura PostScript standard. Cambia il font SOLO
+% dentro la figura, invece di \usepackage{bookman} che lo cambierebbe ovunque.
+% Se pbk non è installato (pacchetto fonts-urw-base35 / tex-gyre), togli
+% \fontfamily{pbk} e resta il corsivo grassetto del documento.
+\newcommand{\fwFont}{\fontfamily{pbk}\selectfont\bfseries\itshape}
+\newcommand{\fwText}[1]{{\fwFont #1}}
+
+\tikzset{
+  % ── 3. tratto UNIFORME: ~1 pt alla dimensione di resa, su ogni forma ────────
+  fw/.style        = {line width=1pt, draw=black, line join=round, line cap=round},
+  % ── 4. forme ───────────────────────────────────────────────────────────────
+  % raggio d'angolo = 35% dell'altezza del box: con altezza 8mm -> 2.8mm
+  fw box/.style    = {fw, rounded corners=2.8mm, inner sep=2.2mm,
+                      align=center, font=\footnotesize, minimum height=8mm},
+  fw input/.style  = {fw box, fill=fwInput,  fill opacity=0.49, text opacity=1},
+  fw view/.style   = {fw box, fill=fwView,   fill opacity=0.49, text opacity=1},
+  fw panel/.style  = {fw box, fill=fwPanel,  fill opacity=0.59, text opacity=1},
+  fw decoder/.style= {fw box, fill=fwPanelB, fill opacity=0.59, text opacity=1},
+  % encoder: trapezio rastremato verso il basso
+  fw encoder/.style= {fw, trapezium, trapezium left angle=72, trapezium right angle=72,
+                      trapezium stretches body, shape border rotate=180,
+                      fill=fwEnc, fill opacity=0.49, text opacity=1,
+                      align=center, font=\footnotesize, inner sep=2mm, minimum height=9mm},
+  % contenitore delle illustrazioni concettuali
+  fw bubble/.style = {fw, ellipse, fill=fwInner, fill opacity=0.99, text opacity=1,
+                      align=center, font=\scriptsize, inner sep=2.4mm},
+  % ── 5. sfondi di stage: grandi, arrotondati, SENZA contorno ────────────────
+  fw stage a/.style= {rounded corners=3mm, fill=fwStageA, fill opacity=0.19, draw=none},
+  fw stage b/.style= {rounded corners=3mm, fill=fwStageB, fill opacity=0.19, draw=none},
+  fw stage tag/.style = {font=\small, anchor=south west, inner sep=1mm},
+  % ── 6. frecce: punta triangolare barbata ───────────────────────────────────
+  fw arrow/.style  = {fw, -{Stealth[length=2.6mm, width=2.2mm, inset=0.7mm]}},
+  fw dash/.style   = {fw, dash pattern=on 1.4mm off 1mm},
+  % nodo di loss: terminale, grande
+  fw loss/.style   = {font=\normalsize, inner sep=0.6mm},
+}
+
+% Etichetta di loss nello stesso peso della figura: \fwLoss{cross} -> L_cross
+\newcommand{\fwLoss}[1]{$\boldsymbol{\mathcal{L}}_{\text{\scriptsize\itshape #1}}$}
+
+% ═══════════════════════════════════════════════════════════════════════════════
+%  Scheletro d'uso — la composizione dell'originale: ingresso in alto, ventaglio
+%  su N viste, una riga di encoder, le rappresentazioni, poi DUE regioni di stage
+%  affiancate ciascuna con i propri termini di loss che convergono su una finale.
+%
+%  \begin{figure}[t]\centering
+%  \begin{tikzpicture}[node distance=6mm and 8mm]
+%    \node[fw input] (aug) {\fwText{Stochastic Augmentation}\\\fwText{\& Random Masking}};
+%    \node[fw view, below left=9mm and 16mm of aug]  (v1) {\fwText{View 1}};
+%    \node[fw view, below=9mm of aug]                (v2) {\fwText{View 2}};
+%    \node[fw view, below right=9mm and 16mm of aug] (vn) {\fwText{View N}};
+%    \node[fw encoder, below=6mm of v1] (e1) {\fwText{Mamba}\\\fwText{Encoder}};
+%    \foreach \s/\t in {aug/v1, aug/v2, aug/vn, v1/e1} \draw[fw arrow] (\s) -- (\t);
+%    \node[fw loss] (lp) {\fwLoss{pre}};
+%    % lo sfondo di stage si disegna DOPO, sul layer background, con `fit`
+%    \begin{scope}[on background layer]
+%      \node[fw stage a, fit=(e1)(lp), inner sep=3mm] (sa) {};
+%    \end{scope}
+%    \node[fw stage tag, below right] at (sa.south west) {\fwText{Pretraining Stage}};
+%  \end{tikzpicture}
+%  \caption{...}\end{figure}
+% ═══════════════════════════════════════════════════════════════════════════════

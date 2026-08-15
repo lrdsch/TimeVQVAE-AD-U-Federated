@@ -1,0 +1,265 @@
+{
+  "cluster": "ucr_014",
+  "arm": "federated_enc_fedavg",
+  "seed": 0,
+  "tag": "zn_enc",
+  "dataset": "ucr_split_w2p",
+  "run_dir": "/home/leonardo/PhD/TimeVQVAE-AD-U-Federated/artifacts/runs/zn_enc",
+  "clients": [
+    "ucr_014_p0",
+    "ucr_014_p1",
+    "ucr_014_p2",
+    "ucr_014_p3",
+    "ucr_014_p4"
+  ],
+  "config": {
+    "window_length": 330,
+    "window_normalization": "zscore",
+    "codebook_size": 64,
+    "prior": "maskgit_3d_pos",
+    "scaling": "per_entity_standard"
+  },
+  "D0": {
+    "reference": "ucr_014_p0",
+    "max_abs_diff_per_client": {
+      "ucr_014_p1": 1.430511474609375e-06,
+      "ucr_014_p2": 1.430511474609375e-06,
+      "ucr_014_p3": 9.5367431640625e-07,
+      "ucr_014_p4": 1.430511474609375e-06
+    },
+    "worst": 1.430511474609375e-06,
+    "inputs_identical": true,
+    "verdict": "PULITO \u2014 i 5 client ricevono finestre identiche: ogni disaccordo di token in D1 \u00e8 attribuibile SOLO all'encoder."
+  },
+  "codebook_max_delta_across_clients": 0.0,
+  "D1": {
+    "codebook_max_delta": 0.0,
+    "cross_client_interpretable": true,
+    "codebook_usage": {
+      "ucr_014_p0": {
+        "active_codes_corpus": 63,
+        "perplexity_corpus": 14.42234043303264,
+        "top1_share": 0.3784933943089431,
+        "tokens_per_window": 123,
+        "distinct_codes_per_window_mean": 28.1953125,
+        "distinct_codes_per_window_median": 28.0,
+        "distinct_codes_per_window_p10": 25.0,
+        "distinct_codes_per_window_p90": 31.0,
+        "effective_codes_per_window_median": 11.734764725646178
+      },
+      "ucr_014_p1": {
+        "active_codes_corpus": 63,
+        "perplexity_corpus": 14.432687824549141,
+        "top1_share": 0.3783028455284553,
+        "tokens_per_window": 123,
+        "distinct_codes_per_window_mean": 28.2109375,
+        "distinct_codes_per_window_median": 28.0,
+        "distinct_codes_per_window_p10": 25.0,
+        "distinct_codes_per_window_p90": 31.0,
+        "effective_codes_per_window_median": 11.754580104090461
+      },
+      "ucr_014_p2": {
+        "active_codes_corpus": 64,
+        "perplexity_corpus": 14.52788977577404,
+        "top1_share": 0.3684789972899729,
+        "tokens_per_window": 123,
+        "distinct_codes_per_window_mean": 28.200520833333332,
+        "distinct_codes_per_window_median": 29.0,
+        "distinct_codes_per_window_p10": 25.0,
+        "distinct_codes_per_window_p90": 31.0,
+        "effective_codes_per_window_median": 11.802126447090416
+      },
+      "ucr_014_p3": {
+        "active_codes_corpus": 63,
+        "perplexity_corpus": 14.566609836396221,
+        "top1_share": 0.3819656165311653,
+        "tokens_per_window": 123,
+        "distinct_codes_per_window_mean": 28.333333333333332,
+        "distinct_codes_per_window_median": 29.0,
+        "distinct_codes_per_window_p10": 25.0,
+        "distinct_codes_per_window_p90": 31.0,
+        "effective_codes_per_window_median": 11.87485018397859
+      },
+      "ucr_014_p4": {
+        "active_codes_corpus": 64,
+        "perplexity_corpus": 14.17457695085838,
+        "top1_share": 0.38799966124661245,
+        "tokens_per_window": 123,
+        "distinct_codes_per_window_mean": 28.479166666666668,
+        "distinct_codes_per_window_median": 29.0,
+        "distinct_codes_per_window_p10": 26.0,
+        "distinct_codes_per_window_p90": 31.0,
+        "effective_codes_per_window_median": 11.630733454185176
+      }
+    },
+    "median_distinct_codes_per_window": 29.0,
+    "pairs": {
+      "ucr_014_p0|ucr_014_p1": {
+        "agree_raw": 0.9919334349593496,
+        "p_chance": 0.1706193493945415,
+        "kappa": 0.990273989350051,
+        "agree_hungarian_fit": 0.9921663279132791,
+        "agree_hungarian_heldout": 0.99170054200542,
+        "support_jaccard": 1.0,
+        "support_intersection": 63,
+        "js_marginal": 1.605875936828722e-05,
+        "agree_by_freq": [
+          0.9871061991869918,
+          0.9910442073170732,
+          0.9976498983739838
+        ]
+      },
+      "ucr_014_p0|ucr_014_p2": {
+        "agree_raw": 0.9376693766937669,
+        "p_chance": 0.1684750888453054,
+        "kappa": 0.925040582103935,
+        "agree_hungarian_fit": 0.9389397018970189,
+        "agree_hungarian_heldout": 0.9363990514905149,
+        "support_jaccard": 0.984375,
+        "support_intersection": 63,
+        "js_marginal": 0.0011764108677195478,
+        "agree_by_freq": [
+          0.9197789634146342,
+          0.9232723577235772,
+          0.9699568089430894
+        ]
+      },
+      "ucr_014_p0|ucr_014_p3": {
+        "agree_raw": 0.9134908536585366,
+        "p_chance": 0.17050221573920302,
+        "kappa": 0.8957090085315229,
+        "agree_hungarian_fit": 0.9211128048780488,
+        "agree_hungarian_heldout": 0.9058689024390244,
+        "support_jaccard": 1.0,
+        "support_intersection": 63,
+        "js_marginal": 0.0010684047289584802,
+        "agree_by_freq": [
+          0.8989456300813008,
+          0.8790650406504065,
+          0.9624618902439024
+        ]
+      },
+      "ucr_014_p0|ucr_014_p4": {
+        "agree_raw": 0.9049161585365854,
+        "p_chance": 0.1732301829913783,
+        "kappa": 0.88499357438151,
+        "agree_hungarian_fit": 0.9112466124661247,
+        "agree_hungarian_heldout": 0.8985857046070461,
+        "support_jaccard": 0.984375,
+        "support_intersection": 63,
+        "js_marginal": 0.0020461403146506546,
+        "agree_by_freq": [
+          0.8773501016260162,
+          0.872776930894309,
+          0.9646214430894309
+        ]
+      },
+      "ucr_014_p1|ucr_014_p2": {
+        "agree_raw": 0.9374576558265583,
+        "p_chance": 0.16838706770572273,
+        "kappa": 0.9247939254613343,
+        "agree_hungarian_fit": 0.939109078590786,
+        "agree_hungarian_heldout": 0.9358062330623306,
+        "support_jaccard": 0.984375,
+        "support_intersection": 63,
+        "js_marginal": 0.0012847427792896068,
+        "agree_by_freq": [
+          0.9164761178861789,
+          0.9239075203252033,
+          0.9719893292682927
+        ]
+      },
+      "ucr_014_p1|ucr_014_p3": {
+        "agree_raw": 0.9101033197831978,
+        "p_chance": 0.1704186883786129,
+        "kappa": 0.8916360832175663,
+        "agree_hungarian_fit": 0.9183604336043361,
+        "agree_hungarian_heldout": 0.9018462059620597,
+        "support_jaccard": 1.0,
+        "support_intersection": 63,
+        "js_marginal": 0.0011344559190090038,
+        "agree_by_freq": [
+          0.8944994918699187,
+          0.8754446138211383,
+          0.9603658536585366
+        ]
+      },
+      "ucr_014_p1|ucr_014_p4": {
+        "agree_raw": 0.8998348577235772,
+        "p_chance": 0.17312827304897213,
+        "kappa": 0.8788625381523594,
+        "agree_hungarian_fit": 0.9062076558265583,
+        "agree_hungarian_heldout": 0.8934620596205962,
+        "support_jaccard": 0.984375,
+        "support_intersection": 63,
+        "js_marginal": 0.0022924395113857196,
+        "agree_by_freq": [
+          0.8697281504065041,
+          0.8673145325203252,
+          0.9624618902439024
+        ]
+      },
+      "ucr_014_p2|ucr_014_p3": {
+        "agree_raw": 0.8597137533875339,
+        "p_chance": 0.16773354852120148,
+        "kappa": 0.8314407046406822,
+        "agree_hungarian_fit": 0.866234756097561,
+        "agree_hungarian_heldout": 0.8531927506775068,
+        "support_jaccard": 0.984375,
+        "support_intersection": 63,
+        "js_marginal": 0.003376222554796326,
+        "agree_by_freq": [
+          0.8353658536585366,
+          0.8111026422764228,
+          0.9326727642276422
+        ]
+      },
+      "ucr_014_p2|ucr_014_p4": {
+        "agree_raw": 0.8650914634146342,
+        "p_chance": 0.17065138320283524,
+        "kappa": 0.8373319327325042,
+        "agree_hungarian_fit": 0.8718665311653117,
+        "agree_hungarian_heldout": 0.8583163956639567,
+        "support_jaccard": 1.0,
+        "support_intersection": 64,
+        "js_marginal": 0.0032232489395000643,
+        "agree_by_freq": [
+          0.8448297764227642,
+          0.8145960365853658,
+          0.9358485772357723
+        ]
+      },
+      "ucr_014_p3|ucr_014_p4": {
+        "agree_raw": 0.9467733739837398,
+        "p_chance": 0.1734151442451686,
+        "kappa": 0.9356065797169076,
+        "agree_hungarian_fit": 0.9461805555555556,
+        "agree_hungarian_heldout": 0.9473661924119241,
+        "support_jaccard": 0.984375,
+        "support_intersection": 63,
+        "js_marginal": 0.0014326754359907227,
+        "agree_by_freq": [
+          0.9296239837398373,
+          0.921557418699187,
+          0.9891387195121951
+        ]
+      }
+    },
+    "mean_kappa": 0.8995688918288373,
+    "mean_agree_raw": 0.916698424796748,
+    "mean_agree_hungarian_heldout": 0.9122544037940379,
+    "mean_support_jaccard": 0.990625,
+    "mean_hungarian_gain": -0.00444402100271013,
+    "tie_margin": {
+      "median": 0.6574095487594604,
+      "frac_below_0.01": 0.008172425474254742,
+      "frac_below_0.05": 0.03937584688346883
+    },
+    "verdict": "ENCODER CONCORDANTI (kappa=0.900, accordo grezzo 0.917). La premessa 'latenti diversi' \u00e8 falsa in questo cluster: il gauge fixing non serve."
+  },
+  "elapsed_s": 7.9,
+  "D_computed": [
+    "d0",
+    "d1"
+  ]
+}

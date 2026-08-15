@@ -38,6 +38,41 @@ segno strutturato**:
 Registrare questo **ora** è ciò che impedisce all'ipotesi di essere infalsificabile: senza
 questo paragrafo, qualunque esito la «conferma».
 
+### 2bis. 🔴 `ks` muove DUE variabili insieme — confondente trovato il 2026-08-09 02:30
+
+Letto il codice ([model/prior.py:824-843](../model/prior.py#L824-L843)), lo scoring funziona
+così: per **ogni** colonna latente `w` si fa un forward separato mascherando una finestra di
+`ks` colonne **centrata su w** (l'unità mascherata è la colonna intera — tutti i canali C e
+tutte le righe di frequenza F a quell'istante). Poi:
+
+```python
+out[ri, :, :, :, w] = -gathered[j, :, :, :, lo:hi].mean(dim=-1)
+```
+
+Lo score assegnato a `w` **non è la NLL in `w`**: è la **media della NLL sulle `ks` colonne
+mascherate**. Quindi `ks` controlla contemporaneamente:
+
+- **(A)** quanto contesto è nascosto al prior — la variabile del meccanismo di §1;
+- **(B)** la larghezza della **media** che produce il profilo di score — un filtro passa-basso
+  di ampiezza `ks` sull'asse latente.
+
+Un picco stretto sull'anomalia sopravvive a ks=1 e viene **spalmato** a ks=21 per (B) soli,
+senza che (A) c'entri nulla. ⇒ **il guadagno di ks=1 su `ucr_170` non è attribuibile al
+meccanismo finché (A) e (B) non sono separati.**
+
+**Controllo di separazione, obbligatorio, PRE-REGISTRATO**: ripetere la configurazione del
+paper prendendo come score **solo la colonna centrale** (`-gathered[..., w]`) invece della
+media su `lo:hi`. Stesso contesto nascosto, smoothing azzerato. Lettura:
+
+| esito del controllo | conclusione |
+|---|---|
+| centro-solo ≈ ks=1 | il guadagno è **(B)**, cioè smoothing: non è un fatto sul prior, è un filtro. Il racconto «sicuro e sbagliato» **non** regge |
+| centro-solo ≈ paper | il guadagno è **(A)**, il contesto: il meccanismo di §1 sopravvive |
+| intermedio | contributo misto, da quantificare come frazione di Δ |
+
+Questo controllo va eseguito **su `ucr_170` per primo** — è la serie su cui l'effetto è stato
+osservato — e prima di leggere qualunque Δ sulle altre nove.
+
 ## 3. La griglia
 
 | asse | valori | nota |
@@ -116,6 +151,74 @@ L'ultima riga ha **precedenza** sulle prime tre: si legge per prima.
 - Tre serie su nove non discriminano (`ucr_229` pavimento, `ucr_083` soffitto, `ucr_086`
   shard-dipendente): l'n effettivo è ~6, non 9. La mediana su 9 va riportata **insieme** alla
   mediana sulle discriminanti.
+
+## Appendice A — emendamenti del 2026-08-09 02:5x, **prima** di qualunque numero fuori da `ucr_170`
+
+Lo scout del codice ha misurato cose che rendono §3 e §6 inapplicabili come scritti. Gli
+emendamenti sono tutti **restrittivi** (rendono il criterio più difficile da superare, mai più
+facile) e sono chiusi prima che la coda scrivesse il primo risultato sulle 9 serie di prova.
+
+**A1 — la tolleranza di riproduzione di §6.1 era irrealizzabile.** «~6 decimali» non è
+raggiungibile fra device diversi: CPU-vs-g2 dà max|Δ| = 4,1e-02 sugli score e Δauprc = 1,2e-05;
+CPU-vs-Ada dà max|Δ| = 6,0e-01. Nuova tolleranza: **|Δ auprc| ≤ 1e-4 e top-K identico**, e
+soprattutto — la contromisura vera — **`paper` viene ri-punteggiato nello stesso processo dei
+ks nuovi**, così il confronto appaiato non attraversa mai due schede. Il `report.json` su disco
+resta un audit, non la baseline. ✅ Verificato in prima persona: `vus_pr` riproduce
+**bit-identico** (0.21265226660369496), `auprc` a 1,2e-05, `auroc` a 2,0e-06.
+
+**A2 — la cache: il pericolo era in un altro punto.** `score_window_size_rates` **è** dentro il
+fingerprint (`detect.py:1141`), quindi `detect()` non può servire score stantii. Il buco vero è
+`pipeline/per_entity_eval.py:188`, che chiama `_load_score_cache` **senza** importare né usare
+`_cache_status` (import a riga 53) ⇒ carica senza verificare il fingerprint. In più
+`_detect_cache_path` fa `anchor.parent.parent`: **una sola slot per ARM, condivisa dai 5
+client**, così un rescore con cache attiva **distruggerebbe la cache della run originale**.
+Contromisure: non si passa mai da `detect()`/`run.py`, `use_score_cache=False`, e sentinella
+mtime+size che aborta. ✅ Diversità verificata: ks1-vs-paper media|Δ| = 49,36, Pearson 0,922 —
+la cache non sta mentendo.
+
+**A3 — metrica primaria: NON cambio quella registrata, ne aggiungo una confermativa.**
+Resta **AUPRC** primaria (§4), perché il test è appaiato per serie e un test dei segni su Δ è
+legittimo anche dove l'AUPRC assoluta non è confrontabile fra serie. Si aggiunge
+**`paper_top1_acc_at_64` come CONFERMATIVA obbligatoria**: deve concordare in direzione. Se
+l'AUPRC dice GENERALIZZA e il top-1 non mostra nessuna serie in miglioramento, il verdetto si
+declassa a **«dipendente dalla metrica»** e si riporta come tale. Questo rende il criterio più
+stretto, mai più largo. Ragione per non promuovere il top-1 a primario: con 5 client si muove a
+scatti di 0,20 e produce molti pareggi, che il test dei segni scarta — a potenza quasi nulla.
+
+**A4 — la griglia in ks assoluto, con i numeri.** `W_lat` ∈ [22, 42], quindi i rate del paper
+danno **già oggi** kernel diversi per serie: `ucr_011` → **[3, 7, 11]** (verificato di persona),
+`ucr_170` → [5, 13, 21], `ucr_001` → [3, 7, 13]. Si usa `rate = (ks + 0,5)/W_lat` con
+`assert _paper_kernel_size(...) == ks`. Griglia eseguita da `scripts/ks_sweep_queue.sh`:
+
+| stage | varianti | arm | serie × client | scopo |
+|---|---|---|---|---|
+| **0** | `paper` con `--center-only` | `a2` | `ucr_170` × 5 | controllo §2bis |
+| **A** | `paper`, `ks=1` | `a2`, `local`, `centralized` | 10 × 5 | confermativo |
+| **B** | `ks` = 3, 5, 9, 13 | `a2` | 10 × 5 | scala di meccanismo |
+
+Stage B si esegue **comunque**, non «solo se A è positivo»: condizionarlo aprirebbe un sentiero
+biforcuto. `ucr_222` **resta nella griglia** benché valga da sola il 35% del costo (8030
+finestre): toglierla porterebbe le serie di prova da 9 a 8 ed è una decisione che si prende qui,
+non dopo. Gira per ultima.
+
+**A5 — il controllo §2bis è implementato e validato.** `scripts/rescore_ks.py --center-only`
+maschera lo stesso blocco di `ks` colonne ma legge la NLL della **sola colonna centrale**.
+Test di correttezza gratuito: a `ks=1` il blocco è una colonna sola, quindi solo-centro **deve**
+coincidere col percorso normale. ✅ Verificato: **bit-identico**, max|Δ| = 0,000e+00 sugli score
+per-timestep, `auprc`/`auroc`/`vus_pr` uguali cifra per cifra.
+
+**A6 — `f1`, `precision`, `recall` sono ESCLUSI da qualunque lettura.** Passando da 3 rate a 1,
+score **e** soglia calano di ~3× (misurato: 58,18 → 18,37), perché sia lo score
+(`prior.py:794-796`) sia la soglia (`detect.py:549-554`) sommano sull'asse τ. Le metriche
+threshold-free riscalano e restano valide; quelle a soglia **no**. Vale solo perché
+`weight_s_local = 0.0`: se qualcuno lo alza, questa nota va riaperta.
+
+**A7 — costo misurato.** ~71 s per τ per client su 2 thread CPU (`ucr_011`). Griglia intera:
+~40 h CPU a 2 thread in un processo, ~10-12 h con 4 processi; **2-5 h su GPU1** (stimato, non
+misurato). Il training già speso su questi checkpoint è di 233,9 GPU-ore ⇒ lo sweep costa
+**~0,5%** di ciò che rimisura. La coda è ripartibile e può passare da CPU a GPU a metà strada,
+ma il **confronto appaiato non attraversa mai due device**, perché ogni processo ri-punteggia
+`paper` insieme ai ks nuovi.
 
 ## 8. Costo dichiarato
 
