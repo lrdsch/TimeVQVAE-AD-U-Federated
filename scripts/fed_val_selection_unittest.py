@@ -44,7 +44,10 @@ def _scripted(values: list[float], n_clients: int):
     """Return a `_val_loss_*` stand-in yielding values[round], called once per client."""
     state = {"n": 0}
 
-    def fn(_client, _device) -> float:
+    # *args: the two real probes do not share a signature — `_val_loss_prior` grew a third
+    # positional (`val_mode`) — and a stub pinned to two arguments makes this test fail with a
+    # TypeError inside the orchestrator instead of testing anything.
+    def fn(*_args, **_kw) -> float:
         v = values[state["n"] // n_clients]
         state["n"] += 1
         return v
@@ -61,7 +64,14 @@ def main() -> int:
     F._val_loss_stage1 = _scripted(S1_VALS, len(CLIENTS))
     F._val_loss_prior = _scripted(S2_VALS, len(CLIENTS))
 
-    clients, global_cb, h1 = F.federated_stage1(cfg, CLIENTS, rounds=len(S1_VALS), local_epochs=1)
+    # ⚠ select_on_val=True is REQUIRED and is not a detail of the test: it is a keyword
+    # argument that defaults to False in both stages, and with it off no round is ever marked
+    # `selected`, so the restore branch this file exists to pin is never reached and every
+    # assertion below passes vacuously or fails for the wrong reason. The real launcher sets
+    # it from the protocol (`federated_eval.py`: select_on_val=(args.protocol == "converged")),
+    # which is the condition every reported cell runs under.
+    clients, global_cb, h1 = F.federated_stage1(cfg, CLIENTS, rounds=len(S1_VALS),
+                                                local_epochs=1, select_on_val=True)
     selected = [r["round"] for r in h1 if r.get("selected")]
     assert selected == [BEST_ROUND], f"stage1 selected {selected}, expected [{BEST_ROUND}]"
     assert all("val_loss" in r for r in h1), "stage1 history must record val_loss per round"
@@ -69,7 +79,8 @@ def main() -> int:
         assert torch.allclose(c.vq.codebook.weight, global_cb), \
             "after restore, global_cb must equal every client's codebook"
 
-    s2_clients, h2, head_div = F.federated_stage2(clients, cfg, rounds=len(S2_VALS), local_epochs=1)
+    s2_clients, h2, head_div = F.federated_stage2(clients, cfg, rounds=len(S2_VALS),
+                                                  local_epochs=1, select_on_val=True)
     selected = [r["round"] for r in h2 if r.get("selected")]
     assert selected == [BEST_ROUND], f"stage2 selected {selected}, expected [{BEST_ROUND}]"
     assert head_div > 0, f"local heads must stay personalized after restore (head_div={head_div})"

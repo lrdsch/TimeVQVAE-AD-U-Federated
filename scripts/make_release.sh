@@ -29,6 +29,15 @@ PY="${PY:-/home/leonardo/PhD/TimeVQVAE-AD-M/.venv/bin/python3.10}"
 
 RESULTS=1; [[ "${1:-}" == "--no-results" ]] && RESULTS=0
 
+# The tags whose per-cell results ship with the code. They are also the only paths under
+# artifacts/runs/ that the exported .gitignore re-includes, so a tag the reader produces is
+# untracked by default and cannot be committed by accident.
+TAGS=(zn_main zn_a1 zn_a2 zn_enc zn_ot zn_es zn_a2s2_ctrl zn_a2s2_tau64 zn_a2s2_lep
+      zn_cbfa_tau64 zn_fedtokcp zn_170_ctfp c50_local c50_central c50_a2 c50_tau64)
+# zn_floor is whitelisted but NOT copied wholesale: of its 193 head/mode combinations only the
+# moving-average head is the floor the paper reports, and it is copied on its own further down.
+TRACKED_TAGS=("${TAGS[@]}" zn_floor)
+
 say() { echo "[make_release] $*"; }
 copy() { mkdir -p "$OUT/$(dirname "$1")"; cp -p "$REPO/$1" "$OUT/$1"; }
 
@@ -40,7 +49,7 @@ mkdir -p "$OUT"
 # not by hand: see scripts/make_release.sh history. Anything not reachable from an entry
 # point below is not shipped.
 CODE=(
-  config.py data.py utils.py metrics_core.py LICENSE requirements.txt
+  config.py data.py utils.py metrics_core.py LICENSE
   model/__init__.py model/common.py model/transforms.py model/encoder.py
   model/vector_quantizer.py model/decoder.py model/prior.py model/prior_upstream.py
   pipeline/stage1.py pipeline/stage2.py pipeline/detect.py
@@ -61,6 +70,7 @@ SCRIPTS=(
   latent_probe.py                                  # kappa: do the clients tokenize alike?
   fusion_probe.py                                  # score fusion (configuration (n))
   cf_quality.py cf_figure.py fig_overview.py       # counterfactual quality + the two figures
+  cf_explainable.py                                # the label-free counterfactual of Fig. 1(c)
   paper2_numbers.py                                # re-derives and CHECKS the paper's numbers
   fed_codebook_unittest.py fed_cb_server_ema_unittest.py fed_enc_algo_unittest.py
   fed_regression_unittest.py fed_val_selection_unittest.py
@@ -72,12 +82,7 @@ copy cohorts/c50.json
 say "code: ${#CODE[@]} files + ${#SCRIPTS[@]} scripts + 2 cohorts"
 
 # ── 2. the two shell drivers, patched ────────────────────────────────────────────────
-patch_file() {          # patch_file <relpath> <<'EOF' ... EOF   (python literal patcher)
-  local rel="$1"
-  mkdir -p "$OUT/$(dirname "$rel")"
-  "$PY" - "$REPO/$rel" "$OUT/$rel" || { echo "PATCH FAILED on $rel" >&2; exit 3; }
-}
-
+mkdir -p "$OUT/scripts"
 "$PY" - "$REPO/scripts/launch.sh" "$OUT/scripts/launch.sh" <<'PYEOF' || exit 3
 import sys
 src, dst = sys.argv[1], sys.argv[2]
@@ -162,20 +167,113 @@ open(dst, "w", encoding="utf-8").write(t)
 PYEOF
 chmod +x "$OUT/scripts/launch.sh" "$OUT/scripts/smoke_arms.sh"
 
-# the two unit tests that print our interpreter path in their usage line
-"$PY" - "$OUT" <<'PYEOF'
+# the unit tests: the interpreter path in their usage line, plus the two checks that reach
+# outside what the public tree contains
+"$PY" - "$OUT" <<'PYEOF' || exit 3
 import pathlib, sys
 out = pathlib.Path(sys.argv[1])
-for rel in ("scripts/fed_enc_algo_unittest.py", "scripts/fed_regression_unittest.py"):
+
+def edit(rel, pairs):
     p = out / rel
-    p.write_text(p.read_text(encoding="utf-8").replace(
-        "/home/leonardo/PhD/TimeVQVAE-AD-M/.venv/bin/python3.10", "python3"), encoding="utf-8")
+    t = p.read_text(encoding="utf-8")
+    for old, new, why in pairs:
+        if t.count(old) != 1:
+            raise SystemExit(f"{rel}: [{why}] not found verbatim -- source drifted")
+        t = t.replace(old, new)
+    p.write_text(t, encoding="utf-8")
+
+VENV = "/home/leonardo/PhD/TimeVQVAE-AD-M/.venv/bin/python3.10"
+edit("scripts/fed_enc_algo_unittest.py", [(VENV, "python3", "interpreter")])
+
+# The Federated-Analytics launcher is a shelved suite of the private tree and is not shipped;
+# its three guards are checks about THAT file, not about anything in this repository.
+edit("scripts/fed_regression_unittest.py", [
+    (VENV, "python3", "interpreter"),
+    ("""    fa = (REPO / "scripts" / "launch_all_fa.sh").read_text()
+    check("launch_all_fa.sh refuses by default", 'FA_I_KNOW_ITS_SHELVED' in fa)
+    check("...and exits non-zero", "exit 2" in fa)
+    check("...printing the contamination reason, not just a warning",
+          "mixture_eval.py:174" in fa)
+
+""", "", "launch_all_fa guards"),
+])
+
+# Two comments point at CLAUDE.md, a working-tree file that is not part of the public repo.
+edit("pipeline/federated_eval.py", [
+    ("as comparable — the CLAUDE.md fingerprint trap.",
+     "as comparable — the incomplete-fingerprint trap.", "fingerprint trap comment"),
+])
+edit("scripts/fig_overview.py", [
+    ("finestra annulla esattamente lo scaler per-entita' (vedi CLAUDE.md).",
+     "finestra annulla esattamente lo scaler per-entita'.", "znorm comment"),
+])
+
+# cf_quality.py resolves an arm LABEL to a (tag, checkpoint directory) pair through a table that
+# hardcodes the tags of our own runs. Outside this tree those tags do not exist, so the public
+# copy takes them from the command line, defaulting to the published names.
+edit("scripts/cf_quality.py", [
+    ("""ARMS = {
+    "local":       ("zn_main", "local", 5),
+    "centralized": ("zn_main", "centralized", 5),
+    "A2":          ("zn_a2", "federated_enc_fedavg_bn-shared_prior-partial", 5),
+}""",
+     """ARMS = {
+    "local":       ("zn_main", "local", 5),
+    "centralized": ("zn_main", "centralized", 5),
+    "A2":          ("zn_a2", "federated_enc_fedavg_bn-shared_prior-partial", 5),
+}
+
+
+def retag(baselines: str, federated: str) -> None:
+    \"\"\"Point the arm table at YOUR tags. `local` and `centralized` come from one run of the
+    baselines, the federated arm from another, which is how the campaign was laid out.\"\"\"
+    for label in ("local", "centralized"):
+        tag, arm_dir, n = ARMS[label]
+        ARMS[label] = (baselines, arm_dir, n)
+    tag, arm_dir, n = ARMS["A2"]
+    ARMS["A2"] = (federated, arm_dir, n)""", "arm table"),
+    ('    ap.add_argument("--series", required=True, help="lista separata da virgole")',
+     '    ap.add_argument("--series", required=True, help="lista separata da virgole")\n'
+     '    ap.add_argument("--tag-baselines", default="zn_main",\n'
+     '                    help="tag holding the `local` and `centralized` runs")\n'
+     '    ap.add_argument("--tag-federated", default="zn_a2",\n'
+     '                    help="tag holding the federated run scored as arm A2")', "tag flags"),
+    ("    a = ap.parse_args()\n",
+     "    a = ap.parse_args()\n    retag(a.tag_baselines, a.tag_federated)\n", "retag call"),
+])
+
+# The val-selection test ran on a private KPI dataset. Same test, same two-client federation,
+# on the synthetic dataset this repository can generate (scripts/build_toy_fed_uni.py) -- what
+# it pins is the round-selection logic, which does not depend on which data it sees.
+edit("scripts/fed_val_selection_unittest.py", [
+    ('DATASET = "wsd_fed"\nCLIENTS = ["kpi_012", "kpi_036"]        '
+     '# the two smallest clients: fast, both in c2',
+     'DATASET = "toy_fed_uni"\nCLIENTS = ["uni_00", "uni_01"]           '
+     '# two clients of one synthetic cluster\n'
+     '# (generate the data first: python scripts/build_toy_fed_uni.py)',
+     "private dataset"),
+])
+PYEOF
+# the framework diagram of Fig. 1: a standalone matplotlib script, renamed to sit next to the
+# other figure generators instead of under the paper's style directory
+"$PY" - "$REPO/documentation/framework_style/a2_framework.py" "$OUT/scripts/fig_framework.py" <<'PYEOF' || exit 3
+import sys
+t = open(sys.argv[1], encoding="utf-8").read().replace(
+    "/home/leonardo/PhD/TimeVQVAE-AD-M/.venv/bin/python3.10 a2_framework.py",
+    "python3 scripts/fig_framework.py")
+open(sys.argv[2], "w", encoding="utf-8").write(t)
 PYEOF
 say "drivers: launch.sh + smoke_arms.sh patched (interpreter, GPU brokers, MPS)"
 
 # ── 3. hand-written public files ─────────────────────────────────────────────────────
 cp -p "$SRC/README.md"        "$OUT/README.md"
 cp -p "$SRC/gitignore"        "$OUT/.gitignore"
+# the published tags, re-included one by one (see the note in the file)
+for t in "${TRACKED_TAGS[@]}"; do echo "!artifacts/runs/$t/"; done >> "$OUT/.gitignore"
+# NOT the repo-root requirements.txt: that one is a 154-package freeze of a Windows env, Intel
+# runtime and jupyter stack included. The public one lists what the shipped code imports, at the
+# versions that produced the runs.
+cp -p "$SRC/requirements.txt" "$OUT/requirements.txt"
 mkdir -p "$OUT/docs"
 for d in "$SRC"/docs/*.md; do cp -p "$d" "$OUT/docs/$(basename "$d")"; done
 for s in "$SRC"/scripts/*; do cp -p "$s" "$OUT/scripts/$(basename "$s")"; done
@@ -187,14 +285,16 @@ say "docs: README + $(ls "$SRC"/docs/*.md | wc -l) pages + $(ls "$SRC"/scripts |
 # scripts/c50_table.py. Shipped: the per-cell summary json, the per-client report.json, and
 # the score profiles of the `local` arm (the input to the fusion analysis). NOT shipped:
 # checkpoints and token caches, which are 54 GB and reproduce from the summaries anyway.
-TAGS=(zn_main zn_a1 zn_a2 zn_enc zn_ot zn_es zn_a2s2_ctrl zn_a2s2_tau64 zn_a2s2_lep
-      zn_cbfa_tau64 zn_fedtokcp zn_170_ctfp c50_local c50_central c50_a2 c50_tau64)
 if [[ $RESULTS -eq 1 ]]; then
   n=0
   for t in "${TAGS[@]}"; do
     [[ -d "artifacts/runs/$t" ]] || { say "!! missing tag $t -- results incomplete"; continue; }
+    # two passes on purpose: -maxdepth is a global option, so a single `A -o B` would clamp the
+    # deep report.json branch to depth 2 as well and silently ship only the summaries.
     while IFS= read -r f; do cp -p --parents "$f" "$OUT/"; n=$((n+1)); done < <(
-      find "artifacts/runs/$t" -maxdepth 2 -name '*.json' -o -path "*/ckpt/*" -name 'report.json')
+      find "artifacts/runs/$t" -maxdepth 2 -name '*.json')
+    while IFS= read -r f; do cp -p --parents "$f" "$OUT/"; n=$((n+1)); done < <(
+      find "artifacts/runs/$t/ckpt" -name 'report.json' 2>/dev/null)
   done
   # the fusion inputs: five per-timestep test profiles per development series
   while IFS= read -r f; do cp -p --parents "$f" "$OUT/"; n=$((n+1)); done < <(
@@ -203,6 +303,24 @@ if [[ $RESULTS -eq 1 ]]; then
   for f in artifacts/runs/zn_floor/floor/*floor_ma*.json artifacts/runs/zn_floor/PROVENANCE.md; do
     [[ -e "$f" ]] && { cp -p --parents "$f" "$OUT/"; n=$((n+1)); }
   done
+  # Provenance fields inside the results carry the absolute path of the machine that produced
+  # them (`"path": "/home/.../detect_score_cache.npz"`, `--resume-from /home/...` in a RUN.json).
+  # Rewritten to repo-relative, which is both portable and one fewer thing to leak. Every file
+  # is re-parsed afterwards: a rewrite that breaks the JSON must stop the export.
+  "$PY" - "$OUT" "$REPO/" <<'PYEOF' || exit 3
+import json, pathlib, sys
+out, prefix = pathlib.Path(sys.argv[1]), sys.argv[2]
+touched = 0
+for p in (out / "artifacts").rglob("*.json"):
+    t = p.read_text(encoding="utf-8")
+    if prefix not in t:
+        continue
+    new = t.replace(prefix, "")
+    json.loads(new)                      # must still parse, or the export is wrong
+    p.write_text(new, encoding="utf-8")
+    touched += 1
+print(f"[make_release] results: {touched} json files made path-relative")
+PYEOF
   say "results: $n files, $(du -sh "$OUT/artifacts" | cut -f1)"
 else
   say "results: skipped (--no-results)"
