@@ -300,7 +300,7 @@ def main() -> None:
     c.eq("tau64 vs ctrl: mediana", statistics.median(d_tau), -0.001, 0.0005, ST)
     for s, want in [("ucr_011", -0.198), ("ucr_043", -0.245)]:
         if s in A.get(LEP, {}):
-            c.eq(f"31 epoche locali vs ctrl su {s}", A[LEP][s] - A[CTRL][s], want, 0.001, ST)
+            c.eq(f"lep (24 su 011, 31 su 043) vs ctrl su {s}", A[LEP][s] - A[CTRL][s], want, 0.001, ST)
 
     # --- VI-C: (h) sul campione di conferma, dove il ctrl NON esiste -------------------
     SC = "VI-C — (h) sulle 48 di conferma: li' l'oracolo viaggia con tau"

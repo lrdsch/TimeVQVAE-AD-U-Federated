@@ -60,15 +60,14 @@ def trapez(x, y, w, h, fc, lines, fs=4.4*FS, flip=False, taper=0.30):
         ax.text(x, y + (len(lines) - 1 - 2 * i) * fs * 0.248, s, fontsize=fs, zorder=4, **TXT)
 
 
-def stage(x, y, w, h, fc, tag, tag_side="left"):
+def stage(x, y, w, h, fc, tag):
     ax.add_patch(FancyBboxPatch((x - w / 2, y - h / 2), w, h,
                                 boxstyle="round,pad=0,rounding_size=2.4",
                                 fc=fc, alpha=A_STAGE, ec="none", zorder=0))
-    is_left = tag_side == "left"
-    tag_x = x - w / 2 + 2.0 if is_left else x + w / 2 - 2.0
-    ax.text(tag_x, y - h / 2 + 1.8, tag, fontsize=5.4*FS, zorder=1,
-            family=FONT, style="italic", weight="bold",
-            ha="left" if is_left else "right", va="bottom")
+    # black label at the TOP-LEFT of the region, above every other patch
+    ax.text(x - w / 2 + 2.2, y + h / 2 - 1.5, tag, fontsize=5.4*FS, zorder=7,
+            color="black", family=FONT, style="italic", weight="bold",
+            ha="left", va="top")
 
 
 def arrow(p0, p1, rad=0.0, lw=LW, color="black", head=7.0, ls="-"):
@@ -90,6 +89,11 @@ def snowflake(x, y, s=1.3, color=None):
         ax.plot([x - s * np.cos(a), x + s * np.cos(a)],
                 [y - s * np.sin(a), y + s * np.sin(a)],
                 color=color or ACC["blue"], lw=LW * 0.9, zorder=6, solid_capstyle="round")
+
+
+def frozen(x_left, y_top, s=1.05, dx=1.7, dy=1.3):
+    """Frozen marker OUTSIDE the box, off its top-left corner (x_left, y_top)."""
+    snowflake(x_left - dx, y_top + dy, s)
 
 
 def series(x, y, w, h, seed, spike=None, lw=0.45):
@@ -122,97 +126,99 @@ def tokens(x, y, n, m, cell=1.3, seed=0, anomalous=None, masked=()):
 
 
 # ═════════════ STAGE 1 ═════════════
-# The two training stages now share one grammar: client pipeline on the left,
-# server on the right, and communication confined to the central gutter.
-stage(50, 109.5, 94, 45, STAGE_A, "Stage 1  ·  tokenizer", tag_side="right")
+# The two training stages share one grammar: client pipeline on the left, server on the
+# right, communication confined to the central gutter, and the stage label at the top-left.
+# The frozen marker (snowflake) sits OUTSIDE its box, off the top-left corner.
+stage(50, 108.9, 94, 46.2, STAGE_A, "Stage 1  ·  tokenizer")          # y 85.8 .. 132
 
 # ---- client pipeline ----
-series(25, 128.0, 25, 2.6, seed=30, lw=0.4)
-box(25, 122.8, 27, 4.6, INPUT, A_BOX, lines=["STFT"], fs=4.8*FS)
-trapez(25, 116.4, 34, 5.2, ENC, [r"Encoder  $E$"], fs=4.6*FS, taper=0.22)
-box(25, 108.8, 38, 6.2, PANEL, A_PANEL,
+series(25, 125.2, 25, 2.6, seed=30, lw=0.4)
+box(25, 120.0, 27, 4.6, INPUT, A_BOX, lines=["STFT"], fs=4.8*FS)
+trapez(25, 113.6, 34, 5.2, ENC, [r"Encoder  $E$"], fs=4.6*FS, taper=0.22)
+box(25, 106.0, 36, 6.2, PANEL, A_PANEL,
     lines=["Vector Quantizer", "codebook FROZEN in-round"], fs=3.9*FS)
-snowflake(6.5, 110.6, 1.0)
-trapez(25, 100.8, 34, 5.4, ENC, [r"Decoder  $D_k$   local"], fs=4.1*FS,
+frozen(25 - 18, 106.0 + 3.1)
+trapez(25, 98.4, 34, 5.4, ENC, [r"Decoder  $D_k$   local"], fs=4.1*FS,
        flip=True, taper=0.22)
-box(25, 92.8, 39, 6.2, INNER, 0.99,
+box(25, 90.6, 39, 6.2, INNER, 0.99,
     lines=[r"$\mathcal{L}_\mathrm{reconstruction} + \mathcal{L}_\mathrm{commit}$"], fs=4.8*FS)
 
-arrow((25, 126.5), (25, 125.2))
-arrow((25, 120.4), (25, 119.4))
-arrow((25, 113.6), (25, 112.0))
-arrow((25, 105.5), (25, 103.7))
-arrow((25, 97.9), (25, 96.1))
+arrow((25, 123.7), (25, 122.4))
+arrow((25, 117.6), (25, 116.6))
+arrow((25, 110.8), (25, 109.2))
+arrow((25, 102.7), (25, 101.1))
+arrow((25, 95.5), (25, 93.9))
 
 # ---- server and ownership note ----
-box(73, 116.1, 46, 18.2, PANEL_B, A_PANEL, lines=[], rr=3.2)
-ax.text(73, 122.5, "Server   (no data)", fontsize=4.9*FS, zorder=6, **TXT)
-ax.text(73, 118.5, "codebook:  k-means M-step", fontsize=4.0*FS, zorder=6, **TXT)
-ax.text(73, 114.6, "encoder:  FedAvg", fontsize=4.0*FS, zorder=6, **TXT)
-ax.text(73, 110.7, "BN running stats:  pooled", fontsize=4.0*FS, zorder=6, **TXT)
-arrow((42.5, 112.0), (50.0, 118.4), rad=-0.17)
-arrow((50.0, 111.4), (42.5, 107.0), rad=-0.17)
+box(73, 113.3, 46, 18.2, PANEL_B, A_PANEL, lines=[], rr=3.2)
+ax.text(73, 119.7, "Server   (no data)", fontsize=4.9*FS, zorder=6, **TXT)
+ax.text(73, 115.7, "codebook:  k-means M-step", fontsize=4.0*FS, zorder=6, **TXT)
+ax.text(73, 111.8, "encoder:  FedAvg", fontsize=4.0*FS, zorder=6, **TXT)
+ax.text(73, 107.9, "BN running stats:  pooled", fontsize=4.0*FS, zorder=6, **TXT)
+arrow((42.5, 109.2), (50.0, 115.6), rad=-0.17)
+arrow((50.0, 108.6), (42.5, 104.2), rad=-0.17)
 
-box(71, 96.5, 48, 6.4, INNER, 0.99,
+box(71, 94.1, 48, 6.4, INNER, 0.99,
     lines=[r"$D_k$ + refinement never leave client $k$"], fs=4.0*FS)
-ax.plot([39.0, 49.5], [101.0, 97.8], color="black", lw=LW * 0.7,
+ax.plot([39.0, 49.5], [98.6, 95.4], color="black", lw=LW * 0.7,
         ls=(0, (2.2, 1.8)), zorder=2)
 
 # ═════════════ STAGE 2 ═════════════
-stage(50, 71.0, 94, 28, STAGE_B, "Stage 2  ·  prior")
+stage(50, 68.95, 94, 29.7, STAGE_B, "Stage 2  ·  prior")               # y 54.1 .. 83.8
 
-tokens(18.8, 80.8, 8, 3, cell=1.35, seed=11, masked=(2, 3, 6))
-box(25, 73.2, 40, 6.6, PANEL, A_PANEL,
+tokens(18.8, 74.3, 8, 3, cell=1.35, seed=11, masked=(2, 3, 6))
+box(25, 67.8, 40, 6.6, PANEL, A_PANEL,
     lines=["MaskGIT prior", "body shared  /  head local"], fs=4.0*FS)
-box(25, 64.1, 25, 5.6, INNER, 0.99,
+box(25, 58.7, 25, 5.6, INNER, 0.99,
     lines=[r"$\mathcal{L}_\mathrm{stage\,2}$"], fs=5.0*FS)
-arrow((25, 79.5), (25, 76.7))
-arrow((25, 69.8), (25, 67.1))
+arrow((25, 73.8), (25, 71.3))
+arrow((25, 64.4), (25, 61.7))
 
-box(73, 73.2, 46, 14.6, PANEL_B, A_PANEL, lines=[], rr=3.0)
-ax.text(73, 78.3, "Server", fontsize=4.7*FS, zorder=6, **TXT)
-ax.text(73, 74.3, "FedAvg on the body keys", fontsize=4.0*FS, zorder=6, **TXT)
-ax.text(73, 70.1, "channel embedding + bias  stay local",
+box(73, 67.8, 46, 14.6, PANEL_B, A_PANEL, lines=[], rr=3.0)
+ax.text(73, 72.9, "Server", fontsize=4.7*FS, zorder=6, **TXT)
+ax.text(73, 68.9, "FedAvg on the body keys", fontsize=4.0*FS, zorder=6, **TXT)
+ax.text(73, 64.7, "channel embedding + bias  stay local",
         fontsize=3.5*FS, zorder=6, **TXT)
-arrow((43.0, 75.7), (50.0, 77.7), rad=-0.14)
-arrow((50.0, 69.4), (43.0, 70.8), rad=-0.14)
+arrow((43.0, 70.3), (50.0, 72.3), rad=-0.14)
+arrow((50.0, 64.0), (43.0, 65.4), rad=-0.14)
 
 # ═════════════ INFERENCE ═════════════
-ax.plot([4, 96], [54.0, 54.0], color="black", lw=LW * 0.7,
+ax.plot([4, 96], [51.1, 51.1], color="black", lw=LW * 0.7,
         ls=(0, (3.2, 2.4)), zorder=2)
-ax.text(5.5, 51.1, r"Inference   (entirely on client $k$)", fontsize=5.2*FS, zorder=6,
+ax.text(5.5, 48.9, r"Inference   (entirely on client $k$)", fontsize=5.2*FS, zorder=6,
         family=FONT, style="italic", weight="bold", ha="left", va="center")
 
 # Shared trunk: one row followed by a centred prior.
-series(14, 44.8, 21, 3.0, seed=21, spike=0.62)
-ax.text(14, 40.9, "test window", fontsize=4.0*FS, zorder=6, **TXT)
-box(44, 44.8, 30, 5.8, INPUT, A_BOX,
+series(14, 41.9, 21, 3.0, seed=21, spike=0.62)
+ax.text(14, 38.0, "test window", fontsize=4.0*FS, zorder=6, **TXT)
+box(44, 41.9, 30, 5.8, INPUT, A_BOX,
     lines=["encoder + VQ  shared"], fs=4.0*FS)
-snowflake(28.8, 47.4, 1.0)
-arrow((24.7, 44.8), (29.7, 44.8))
+frozen(44 - 15, 41.9 + 2.9)
+arrow((24.7, 41.9), (29.7, 41.9))
 
-tokens(64.5, 42.8, 7, 3, cell=1.35, seed=13, anomalous=(4, 6))
-arrow((58.2, 44.8), (64.2, 44.8))
-box(50, 34.2, 44, 6.8, PANEL, A_PANEL,
+tokens(64.5, 39.9, 7, 3, cell=1.35, seed=13, anomalous=(4, 6))
+arrow((58.2, 41.9), (64.2, 41.9))
+box(50, 31.3, 44, 6.8, PANEL, A_PANEL,
     lines=["prior surprise", "shared body + local head"], fs=4.0*FS)
-arrow((70.0, 42.3), (61.0, 38.2), rad=0.16)
+arrow((70.0, 39.4), (61.0, 35.3), rad=0.16)
 
 # The only branch in inference: detection and explanation.
-arrow((43.0, 30.7), (26.0, 26.5), rad=0.10)
-arrow((57.0, 30.7), (74.0, 26.5), rad=-0.10)
-box(25, 22.8, 44, 6.0, VIEW, A_BOX,
+arrow((43.0, 27.8), (26.0, 23.6), rad=0.10)
+arrow((57.0, 27.8), (74.0, 23.6), rad=-0.10)
+box(25, 19.9, 44, 6.0, VIEW, A_BOX,
     lines=["smoothing over channel and time"], fs=3.8*FS)
-box(75, 22.8, 44, 6.0, PANEL_B, A_PANEL,
+box(75, 19.9, 44, 6.0, PANEL_B, A_PANEL,
     lines=["explainable sampling"], fs=4.1*FS)
 
-box(25, 10.5, 44, 7.4, PANEL_B, A_PANEL,
+box(25, 7.6, 44, 7.4, PANEL_B, A_PANEL,
     lines=["detection", "anomaly score  vs  threshold"], fs=3.8*FS)
-trapez(75, 10.5, 44, 7.4, ENC,
+trapez(75, 7.6, 44, 7.4, ENC,
        ["counterfactual", r"Decoder  $D_k$   local"], fs=4.0*FS,
        flip=True, taper=0.20)
-arrow((25, 19.7), (25, 14.4))
-arrow((75, 19.7), (75, 14.4))
-snowflake(62.0, 14.3, 1.0)
+arrow((25, 16.8), (25, 11.5))
+arrow((75, 16.8), (75, 11.5))
+# flipped trapezoid: the top edge is the short one, its left corner is at x - (w/2 - taper*w)
+frozen(75 - (22 - 0.20 * 44), 7.6 + 3.7, dx=1.2)
 
 
 fig.savefig("a2_framework.pdf")

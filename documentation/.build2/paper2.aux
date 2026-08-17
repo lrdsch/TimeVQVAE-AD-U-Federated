@@ -36,10 +36,11 @@
 \newlabel{sec:background}{{III}{2}{Background: TimeVQVAE-AD}{section.3}{}}
 \@writefile{toc}{\contentsline {section}{\numberline {IV}Federation Design}{2}{section.4}\protected@file@percent }
 \newlabel{sec:design}{{IV}{2}{Federation Design}{section.4}{}}
-\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Configuration (g) on client $k$. Stage~1 federates the encoder and its BN running statistics and keeps the broadcast codebook fixed within a round, the server updating it from~\eqref  {eq:suffstat}; the decoder is never sent. Stage~2 shares the body of the MaskGIT prior, keeping the channel embedding and output bias local. Inference is local and forks into the anomaly score and the counterfactual.}}{2}{figure.1}\protected@file@percent }
-\newlabel{fig:framework}{{1}{2}{Configuration (g) on client $k$. Stage~1 federates the encoder and its BN running statistics and keeps the broadcast codebook fixed within a round, the server updating it from~\eqref {eq:suffstat}; the decoder is never sent. Stage~2 shares the body of the MaskGIT prior, keeping the channel embedding and output bias local. Inference is local and forks into the anomaly score and the counterfactual}{figure.1}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Configuration (g) on client $k$: the federated components (encoder, BN statistics, codebook, prior body), the local ones (decoder, prior head) and the local inference fork into score and counterfactual.}}{2}{figure.1}\protected@file@percent }
+\newlabel{fig:framework}{{1}{2}{Configuration (g) on client $k$: the federated components (encoder, BN statistics, codebook, prior body), the local ones (decoder, prior head) and the local inference fork into score and counterfactual}{figure.1}{}}
 \@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-A}}Tokenizer federation}{2}{subsection.4.1}\protected@file@percent }
 \newlabel{subsec:tokenizer}{{\mbox  {IV-A}}{2}{Tokenizer federation}{subsection.4.1}{}}
+\newlabel{eq:bnpool}{{1}{2}{Tokenizer federation}{equation.1}{}}
 \citation{li2020fedprox}
 \citation{tan2022fedproto}
 \citation{kriegel2011unifying,aggarwal2015outlierensembles}
@@ -52,16 +53,21 @@
 \newlabel{subsec:configs}{{\mbox  {IV-C}}{3}{Evaluated configurations}{subsection.4.3}{}}
 \@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-D}}Score fusion}{3}{subsection.4.4}\protected@file@percent }
 \newlabel{subsec:fusion}{{\mbox  {IV-D}}{3}{Score fusion}{subsection.4.4}{}}
-\@writefile{lot}{\contentsline {table}{\numberline {I}{\ignorespaces Configurations evaluated. ``FedAvg'' is count-weighted parameter averaging, ``pooled'' the aggregation of BN statistics, ``suff.\,stat.'' the codebook update of~\eqref  {eq:suffstat}, ``partial'' the shared prior with client-specific components local. $n$ = development series run and, in parentheses, coverage of the four that separate the arms at all (Section~\ref {subsec:discriminating}), so $4/4$ is a complete cover.}}{3}{table.1}\protected@file@percent }
-\newlabel{tab:space}{{I}{3}{Configurations evaluated. ``FedAvg'' is count-weighted parameter averaging, ``pooled'' the aggregation of BN statistics, ``suff.\,stat.'' the codebook update of~\eqref {eq:suffstat}, ``partial'' the shared prior with client-specific components local. $n$ = development series run and, in parentheses, coverage of the four that separate the arms at all (Section~\ref {subsec:discriminating}), so $4/4$ is a complete cover}{table.1}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {I}{\ignorespaces Configurations evaluated.}}{3}{table.1}\protected@file@percent }
+\newlabel{tab:space}{{I}{3}{Configurations evaluated}{table.1}{}}
 \@writefile{toc}{\contentsline {section}{\numberline {V}Experimental Protocol}{3}{section.5}\protected@file@percent }
 \newlabel{sec:protocol}{{V}{3}{Experimental Protocol}{section.5}{}}
 \@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-A}}Benchmark, choice of series and split}{3}{subsection.5.1}\protected@file@percent }
-\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces One development series, \texttt  {ucr\_001}, under configuration (g). (a)~the training segment is cut chronologically into five client shards of $10/10/20/20/30\%$ plus a validation tail (v); the test segment and its labels are shared and never seen in training. (b)~each client's per-timestep score, its own train-fitted threshold (dashed), the timesteps it declares anomalous (tinted) and the single location it returns under the archive protocol (marker): all five agree, inside the labelled event, while their thresholds admit $1.2$ to $4.1\%$ of the test timesteps. (c)~the same event with the explanation, built with \emph  {no label in the loop}: the timesteps above client~1's threshold are masked across frequency, resampled from the prior with the remaining tokens as context and decoded locally (band = five draws, solid = median). Every configuration already localizes this series.}}{4}{figure.2}\protected@file@percent }
-\newlabel{fig:overview}{{2}{4}{One development series, \texttt {ucr\_001}, under configuration (g). (a)~the training segment is cut chronologically into five client shards of $10/10/20/20/30\%$ plus a validation tail (v); the test segment and its labels are shared and never seen in training. (b)~each client's per-timestep score, its own train-fitted threshold (dashed), the timesteps it declares anomalous (tinted) and the single location it returns under the archive protocol (marker): all five agree, inside the labelled event, while their thresholds admit $1.2$ to $4.1\%$ of the test timesteps. (c)~the same event with the explanation, built with \emph {no label in the loop}: the timesteps above client~1's threshold are masked across frequency, resampled from the prior with the remaining tokens as context and decoded locally (band = five draws, solid = median). Every configuration already localizes this series}{figure.2}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-B}}Training}{4}{subsection.5.2}\protected@file@percent }
 \citation{paparrizos2022vus}
-\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-C}}Metrics and unit of analysis}{5}{subsection.5.3}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces \texttt  {ucr\_001} under configuration (g): (a)~the split, (b)~each client's score, threshold and returned location, (c)~the labelled event with the counterfactual of client~1. The reading key is in the panel headings.}}{4}{figure.2}\protected@file@percent }
+\newlabel{fig:overview}{{2}{4}{\texttt {ucr\_001} under configuration (g): (a)~the split, (b)~each client's score, threshold and returned location, (c)~the labelled event with the counterfactual of client~1. The reading key is in the panel headings}{figure.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-B}}Training}{4}{subsection.5.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-C}}Metrics and unit of analysis}{4}{subsection.5.3}\protected@file@percent }
+\citation{schiavo2026fedtimevqvae}
+\@writefile{lot}{\contentsline {table}{\numberline {II}{\ignorespaces Settings shared by all configurations.}}{5}{table.2}\protected@file@percent }
+\newlabel{tab:hparams}{{II}{5}{Settings shared by all configurations}{table.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-D}}Implementation details and reproducibility}{5}{subsection.5.4}\protected@file@percent }
+\newlabel{subsec:repro}{{\mbox  {V-D}}{5}{Implementation details and reproducibility}{subsection.5.4}{}}
 \@writefile{toc}{\contentsline {section}{\numberline {VI}Results}{5}{section.6}\protected@file@percent }
 \newlabel{sec:results}{{VI}{5}{Results}{section.6}{}}
 \@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {VI-A}}Which series can separate the methods}{5}{subsection.6.1}\protected@file@percent }
@@ -70,25 +76,26 @@
 \newlabel{subsec:reference}{{\mbox  {VI-B}}{5}{Reference points}{subsection.6.2}{}}
 \@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {VI-C}}Main federated configuration}{5}{subsection.6.3}\protected@file@percent }
 \newlabel{subsec:main}{{\mbox  {VI-C}}{5}{Main federated configuration}{subsection.6.3}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {VI-D}}Where the improvement comes from}{5}{subsection.6.4}\protected@file@percent }
-\newlabel{subsec:interaction}{{\mbox  {VI-D}}{5}{Where the improvement comes from}{subsection.6.4}{}}
-\@writefile{lot}{\contentsline {table}{\numberline {II}{\ignorespaces Development set. Left: archive accuracy at tolerance $64$; right: AUPRC of the per-timestep score, with the parameter-free floor as leftmost reference. $\max _j$ is the best individual client and requires test labels to select. The four discriminating series are above the rule. On \texttt  {ucr\_082} every arm is at floor: the counts in the text rest on differences in the fifth decimal.}}{6}{table.2}\protected@file@percent }
-\newlabel{tab:main}{{II}{6}{Development set. Left: archive accuracy at tolerance $64$; right: AUPRC of the per-timestep score, with the parameter-free floor as leftmost reference. $\max _j$ is the best individual client and requires test labels to select. The four discriminating series are above the rule. On \texttt {ucr\_082} every arm is at floor: the counts in the text rest on differences in the fifth decimal}{table.2}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {III}{\ignorespaces Development set: archive accuracy and AUPRC.}}{6}{table.3}\protected@file@percent }
+\newlabel{tab:main}{{III}{6}{Development set: archive accuracy and AUPRC}{table.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {VI-D}}Attribution of the improvement}{6}{subsection.6.4}\protected@file@percent }
+\newlabel{subsec:interaction}{{\mbox  {VI-D}}{6}{Attribution of the improvement}{subsection.6.4}{}}
 \@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {VI-E}}Failure case and score fusion}{6}{subsection.6.5}\protected@file@percent }
 \newlabel{subsec:failure}{{\mbox  {VI-E}}{6}{Failure case and score fusion}{subsection.6.5}{}}
 \@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {VI-F}}Confirmation on the random sample}{6}{subsection.6.6}\protected@file@percent }
 \newlabel{subsec:confirmation}{{\mbox  {VI-F}}{6}{Confirmation on the random sample}{subsection.6.6}{}}
-\@writefile{lot}{\contentsline {table}{\numberline {III}{\ignorespaces Confirmation sample, $n=48$, paired by series. Primary endpoint: archive accuracy at tolerance $64$; AUPRC secondary. $p$ is a two-sided sign test with ties excluded. The mean is given alongside the median because on the primary endpoint the median is zero wherever ties dominate.}}{7}{table.3}\protected@file@percent }
-\newlabel{tab:c50}{{III}{7}{Confirmation sample, $n=48$, paired by series. Primary endpoint: archive accuracy at tolerance $64$; AUPRC secondary. $p$ is a two-sided sign test with ties excluded. The mean is given alongside the median because on the primary endpoint the median is zero wherever ties dominate}{table.3}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {IV}{\ignorespaces Confirmation sample ($n=48$), paired by series.}}{7}{table.4}\protected@file@percent }
+\newlabel{tab:c50}{{IV}{7}{Confirmation sample ($n=48$), paired by series}{table.4}{}}
 \@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {VI-G}}Counterfactual quality}{7}{subsection.6.7}\protected@file@percent }
 \newlabel{subsec:counterfactual}{{\mbox  {VI-G}}{7}{Counterfactual quality}{subsection.6.7}{}}
-\@writefile{lot}{\contentsline {table}{\numberline {IV}{\ignorespaces Counterfactual quality. $\Delta $ = plausibility gain on the rewritten positions, each arm under its own prior; $G$ = specificity gap between anomalous and normal windows. Above the rule, the four discriminating series.}}{7}{table.4}\protected@file@percent }
-\newlabel{tab:cf}{{IV}{7}{Counterfactual quality. $\Delta $ = plausibility gain on the rewritten positions, each arm under its own prior; $G$ = specificity gap between anomalous and normal windows. Above the rule, the four discriminating series}{table.4}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {V}{\ignorespaces Counterfactual quality: plausibility $\Delta $ and specificity $G$.}}{7}{table.5}\protected@file@percent }
+\newlabel{tab:cf}{{V}{7}{Counterfactual quality: plausibility $\Delta $ and specificity $G$}{table.5}{}}
 \@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {VI-H}}Limitations}{7}{subsection.6.8}\protected@file@percent }
 \newlabel{subsec:limitations}{{\mbox  {VI-H}}{7}{Limitations}{subsection.6.8}{}}
 \@writefile{toc}{\contentsline {section}{\numberline {VII}Conclusion}{7}{section.7}\protected@file@percent }
 \newlabel{sec:conclusion}{{VII}{7}{Conclusion}{section.7}{}}
 \citation{li2021fedbn}
+\citation{schiavo2026fedtimevqvae}
 \bibstyle{IEEEtran}
 \bibdata{references}
 \bibcite{blazquezgarcia2022review}{1}
@@ -102,20 +109,21 @@
 \bibcite{lee2023timevqvae}{9}
 \bibcite{entezari2022permutation}{10}
 \bibcite{wang2020fedma}{11}
-\bibcite{kriegel2011unifying}{12}
-\bibcite{aggarwal2015outlierensembles}{13}
-\bibcite{lin2020feddf}{14}
-\bibcite{kairouz2021advances}{15}
-\bibcite{li2020fedprox}{16}
-\bibcite{karimireddy2020scaffold}{17}
-\bibcite{reddi2021adaptive}{18}
-\bibcite{arivazhagan2019fedper}{19}
-\bibcite{liang2020lgfedavg}{20}
-\bibcite{dennis2021kfed}{21}
-\bibcite{tan2022fedproto}{22}
-\bibcite{lubana2022orchestra}{23}
-\bibcite{chang2022maskgit}{24}
-\bibcite{li2021fedbn}{25}
+\bibcite{kairouz2021advances}{12}
+\bibcite{li2020fedprox}{13}
+\bibcite{karimireddy2020scaffold}{14}
+\bibcite{reddi2021adaptive}{15}
+\bibcite{arivazhagan2019fedper}{16}
+\bibcite{liang2020lgfedavg}{17}
+\bibcite{dennis2021kfed}{18}
+\bibcite{tan2022fedproto}{19}
+\bibcite{lubana2022orchestra}{20}
+\bibcite{chang2022maskgit}{21}
+\bibcite{li2021fedbn}{22}
+\bibcite{kriegel2011unifying}{23}
+\bibcite{aggarwal2015outlierensembles}{24}
+\bibcite{lin2020feddf}{25}
 \bibcite{paparrizos2022vus}{26}
+\bibcite{schiavo2026fedtimevqvae}{27}
 \@writefile{toc}{\contentsline {section}{References}{8}{section*.3}\protected@file@percent }
 \gdef \@abspage@last{8}

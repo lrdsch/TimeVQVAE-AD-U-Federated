@@ -122,7 +122,8 @@ them before averaging~\cite{zhu2022fedexdnn}, and PeFAD adapts a pre-trained lan
 distilling through a shared synthetic dataset~\cite{xu2024pefad}; in both the aggregated
 representation is the terminal one, read directly by a scoring function. To our knowledge no
 federated work addresses a pipeline in which a discrete tokenizer produces the symbols consumed by
-a second, generative prior.
+a second, generative prior; accordingly, we compare the local, pooled and federated versions of
+one detector rather than detectors against one another.
 
 \textbf{Discrete tokenization and shared codebooks.} VQ-VAE builds a discrete latent representation
 on a learned codebook and fits a prior over the codes in a second stage~\cite{van2017neural};
@@ -138,9 +139,9 @@ precondition for prior sharing to be well posed at all.
 \section{Background: TimeVQVAE-AD}
 \label{sec:background}
 
-We summarize only what the federation design needs; for the method itself we refer to the original
-paper~\cite{lee2024timevqvaead}. Throughout, a \emph{client} owns a set
-of windows of a univariate series and never shares them.
+We summarize what the federation design needs, referring to the original
+paper~\cite{lee2024timevqvaead} for the method; throughout, a \emph{client} owns a set of windows
+of a univariate series and never shares them.
 
 Stage~1 is a VQ-VAE~\cite{van2017neural} over the short-time Fourier transform of a window: an
 encoder $E$ and a vector quantizer with codebook $\mathcal{C}=\{e_k\}_{k=1}^{K}$ map
@@ -183,11 +184,9 @@ Fig.~\ref{fig:framework} shows the arrangement for configuration (g) below.
 \begin{figure}[t]
 \centering
 \includegraphics[width=\columnwidth]{fig_framework}
-\caption{Configuration (g) on client $k$. Stage~1 federates the encoder and its BN running
-statistics and keeps the broadcast codebook fixed within a round, the server updating it
-from~\eqref{eq:suffstat}; the decoder is never sent. Stage~2 shares the body of the MaskGIT prior,
-keeping the channel embedding and output bias local. Inference is local and forks into the anomaly
-score and the counterfactual.}
+\caption{Configuration (g) on client $k$: the federated components (encoder, BN statistics,
+codebook, prior body), the local ones (decoder, prior head) and the local inference fork into
+score and counterfactual.}
 \label{fig:framework}
 \end{figure}
 
@@ -200,6 +199,7 @@ federated, its BN running statistics are pooled:
     \bar{\phi} = \sum_j \omega_j \phi_j, \quad
     \bar{\mu} = \sum_j \omega_j \mu_j, \quad
     \bar{v} = \sum_j \omega_j (v_j + \mu_j^2) - \bar{\mu}^2 .
+    \label{eq:bnpool}
 \end{equation}
 This is the opposite of the FedBN prescription~\cite{li2021fedbn}: here the clients observe the same
 sensor and regime, so there is no feature shift for a local BN layer to absorb, while a shared
@@ -217,11 +217,16 @@ server computes
     e_k = M_k / \tilde{N}_k,
     \label{eq:suffstat}
 \end{equation}
-with $\tilde{N}_k$ a Laplace-smoothed count, so that each global codeword is updated from statistics
-accumulated across clients without transmitting latent samples or raw data. This motivates the
+with $\tilde{N}_k$ a Laplace-smoothed count, so that each global codeword is updated from per-code
+aggregates accumulated across clients. This motivates the
 alternative but is not a demonstrated defect of averaging: Section~\ref{subsec:interaction} finds
 the two rules indistinguishable in aggregate. Fixing the codebook within a round does not freeze the
-tokenizer, since the encoder keeps changing.
+tokenizer, since the encoder keeps changing. Neither rule is a privacy mechanism: a code a client
+assigns only once sends that latent verbatim under~\eqref{eq:suffstat}, and a formal guarantee
+would require secure aggregation on top.
+% La frase precedente diceva «without transmitting latent samples or raw data»: falsa nel caso
+% limite c_{j,k}=1, dove m_{j,k} E' il latente. Indebolita il 2026-08-16: si afferma
+% aggregazione, non privacy.
 
 \subsection{Prior federation}
 \label{subsec:coupling}
@@ -251,11 +256,7 @@ FedProx~\cite{li2020fedprox} acting on the local objective, FedProto~\cite{tan20
 broadcasting per-code prototypes, and (m) sharing only the starting point.
 
 \begin{table}[t]
-\caption{Configurations evaluated. ``FedAvg'' is count-weighted parameter averaging, ``pooled'' the
-aggregation of BN statistics, ``suff.\,stat.'' the codebook update of~\eqref{eq:suffstat},
-``partial'' the shared prior with client-specific components local. $n$ = development series run
-and, in parentheses, coverage of the four that separate the arms at all
-(Section~\ref{subsec:discriminating}), so $4/4$ is a complete cover.}
+\caption{Configurations evaluated.}
 \label{tab:space}
 \centering
 \scriptsize
@@ -287,7 +288,7 @@ and, in parentheses, coverage of the four that separate the arms at all
 \emph{pooled tokenizer}$^{\mathrm{c}}$ & \multicolumn{5}{c}{\emph{pooled stage 1, federated stage 2}} & 1 (1/4) \\
 \emph{pooled prior}$^{\mathrm{c}}$ & \multicolumn{5}{c}{\emph{federated stage 1 of (g), stage 2 on pooled tokens}} & 4 (4/4) \\
 \hline
-\multicolumn{7}{@{}p{7.4cm}@{}}{$^{\mathrm{a}}$Trained exactly as (a); only inference differs. $^{\mathrm{b}}$Rows (j) to (m) target the same $87$ encoder tensors as (f) but keep the BN running statistics local (``affine'' shares BN scale and shift every round, ``init'' only at initialization), so they are matched to one another and \emph{not} to (f), (g) and (h): their baseline is (j). FedProx uses $\mu=0.01$; (m) is (l) with the prototype pull set to zero. $^{\mathrm{c}}$Not federation-legal, diagnostic only. \emph{Pooled prior} runs on exactly the four discriminating series, so its $n=4$ covers the informative subset completely. Both are matched to the reference of Section~\ref{subsec:main}, not to (g).}
+\multicolumn{7}{@{}p{8.45cm}@{}}{``FedAvg'' is count-weighted parameter averaging, ``pooled'' the BN aggregation~\eqref{eq:bnpool}, ``suff.\,stat.'' the codebook update~\eqref{eq:suffstat}, ``partial'' the prior with client-specific components local. $n$ = development series run and, in parentheses, coverage of the four that separate the arms at all (Section~\ref{subsec:discriminating}). $^{\mathrm{a}}$Trained exactly as (a); only inference differs. $^{\mathrm{b}}$Rows (j) to (m) target the same encoder parameter tensors as (f) but keep the BN running statistics local (``affine'' shares BN scale and shift every round, ``init'' only at initialization), so they are matched to one another and \emph{not} to (f), (g) and (h): their baseline is (j). FedProx uses $\mu=0.01$; (m) is (l) with the prototype pull set to zero. $^{\mathrm{c}}$Not federation-legal, diagnostic only. \emph{Pooled prior} runs on exactly the four discriminating series, so its $n=4$ covers the informative subset completely. Both are matched to the reference of Section~\ref{subsec:main}, not to (g).}
 \end{tabular}
 \end{table}
 
@@ -300,9 +301,9 @@ function-space federated aggregation~\cite{lin2020feddf} do: each client keeps i
 prior unchanged, computes its profile and
 standardizes it over time, and the final score is the pointwise mean across clients, so that only
 per-timestep score vectors are combined and no alignment of parameters, codewords or indices is
-needed. No training is shared, and the profiles can be averaged only because the split divides the
-training segment while the test segment is common, so they are defined on the same timesteps; all
-five models must also be present at inference. Neither holds where clients score their own streams.
+needed. No training is shared; the profiles can be averaged only because the split divides the
+training segment while the test segment is common, and all five models must be present at
+inference: neither holds where clients score their own streams.
 We also report the median, the trimmed mean and the mean of normalized ranks.
 
 \section{Experimental Protocol}
@@ -313,27 +314,25 @@ We also report the median, the trimmed mean and the mean of normalized ranks.
 \begin{figure*}[t]
 \centering
 \includegraphics[width=\textwidth]{fig_overview}
-\caption{One development series, \texttt{ucr\_001}, under configuration (g). (a)~the training
-segment is cut chronologically into five client shards of $10/10/20/20/30\%$ plus a validation tail
-(v); the test segment and its labels are shared and never seen in training. (b)~each client's
-per-timestep score, its own train-fitted threshold (dashed), the timesteps it declares anomalous
-(tinted) and the single location it returns under the archive protocol (marker): all five agree,
-inside the labelled event, while their thresholds admit $1.2$ to $4.1\%$ of the test timesteps.
-(c)~the same event with the explanation, built with \emph{no label in the loop}: the timesteps above
-client~1's threshold are masked across frequency, resampled from the prior with the remaining tokens
-as context and decoded locally (band = five draws, solid = median). Every configuration already
-localizes this series.}
+\caption{\texttt{ucr\_001} under configuration (g): (a)~the split, (b)~each client's score, threshold
+and returned location, (c)~the labelled event with the counterfactual of client~1. The reading key is
+in the panel headings.}
+% «Every configuration already localizes this series» tolta il 2026-08-16 per il tetto delle 8
+% pagine: la stessa informazione sta in VI-A (local gia' a 1.00 su ucr_001).
 \label{fig:overview}
 \end{figure*}
 
 Two settings are inherited from the original method rather than tuned, since it states them as
-such: the window length is $T=2P$, twice the measured period of the series, and each input window is
-z-normalized before the transform; we also keep its frequency resolution ($H=3$ bands) and latent
-temporal width ($32$). With $T=2P$ the UCR Time Series Anomaly archive~\cite{wu2023ucr} leaves 180
-usable series: the remainder either have no measured period or leave the smallest client
-with fewer samples than one window. Ten form a development set on which the configurations were
-explored, selected by period and domain rather than by detection performance, the period-aligned
-window length being approximately logarithmically spaced from $182$ to $970$ samples.
+such: the window length is $T=2P$, twice the tabulated period of the series, and each input window
+is z-normalized before the transform; its frequency resolution is kept as well
+(Table~\ref{tab:hparams}). With $T=2P$ the UCR Time Series Anomaly archive~\cite{wu2023ucr} leaves
+180 usable series: the remainder are too short at that window to give every client shard two
+windows, the validation tail one and the test segment two.
+Ten form a development set on which the configurations were
+% Criterio allineato a build_ucr_split.py (min client 2W, min val 1W, min test 2W): la vecchia
+% frase «fewer samples than one window» era una semplificazione falsa ai bordi.
+explored, selected by period and domain rather than by detection performance, with window lengths
+roughly log-spaced from $182$ to $970$ samples.
 A disjoint set of 50 was then drawn uniformly at random with a fixed seed
 from the remaining 170, the same draw fixing their execution order; the sample, its order, the three
 configurations run on it, the primary metric, the stopping rule, a minimum sample size and a freeze
@@ -343,7 +342,9 @@ date were all fixed before observing any of its results
 Each series is an independent federated task: no parameter, statistic or window is shared between
 series. Within a series the training segment is divided chronologically among five clients holding
 $10\%$, $10\%$, $20\%$, $20\%$ and $30\%$ of the data, the final $10\%$ is held out for validation,
-and the archive's test segment and labels are never used in training (Fig.~\ref{fig:overview}).
+and the archive's test segment and labels are never used in training (Fig.~\ref{fig:overview},
+where the five clients of (g) all localize the event while their thresholds admit $1.2$ to $4.1\%$
+of the test timesteps).
 Windows are extracted with unit stride, so a shard of length $L$ contributes $L-T+1$ windows, and
 these counts are the aggregation weights of Section~\ref{sec:design}. The split is deliberately
 homogeneous: the five clients observe the same sensor, regime and units and differ only in how
@@ -352,18 +353,15 @@ differences between local and federated training.
 
 \subsection{Training}
 
-All configurations use the same trainer and select the best validation round, but the stopping
-criterion is granular to the setting: local and centralized training stop on validation patience
-counted in optimizer steps inside a fixed step budget, federated configurations on patience counted
-in aggregation rounds, validation being defined once per round; a federated run that exhausts its
-round ceiling without triggering patience is marked truncated and excluded. The baselines' step
-budget binds in $9\%$ of their stage-runs on the development set and in $15$ to $25\%$ on the
-confirmation sample, and those runs are retained, so the baselines are, if anything, the arm more
-likely to be reported before convergence.
+All configurations use the trainer of Table~\ref{tab:hparams} and select the best validation round;
+the criteria differ only in their unit, optimizer steps for local and centralized training and
+aggregation rounds for federated ones, and a federated stage whose best round is its last is
+reported as truncated. The baselines' step ceiling binds in $21\%$ of their stage-runs on the
+development set and in $15$ to $25\%$ on the confirmation sample, and those runs are retained, so
+the baselines are, if anything, the arm more likely to be reported before convergence.
 
-Capacity is fixed across configurations: a codebook of $K=64$ entries of dimension $64$, an encoder
-of base width $16$, and a four-layer prior with four heads and width $128$, optimized with AdamW.
-The codebook is smaller than in the original method, so our reference results are not directly
+Capacity is fixed across configurations, with a codebook smaller than in the original method, so
+our reference results are not directly
 comparable with its published accuracy. One seed is run per experimental cell. We also
 report a parameter-free floor, the squared residual of a centered moving average of length $10$
 pushed through the same detection path; having no parameters it admits no federated variant and is a
@@ -383,6 +381,35 @@ leaves nothing of the training profile above it at the nominal $q=0.99$ and admi
 and $0.978$ of the test timesteps depending on the arm, nor range-aware measures~\cite{paparrizos2022vus}, whose scale
 depends on anomaly duration. The unit of analysis is the series: the five clients are shards of one
 signal, not independent replicates, so comparisons are paired by series.
+
+\subsection{Implementation details and reproducibility}
+\label{subsec:repro}
+
+Table~\ref{tab:hparams} lists the settings shared by every configuration, as recorded in the launch
+metadata of the runs. The code, one command per row of Table~\ref{tab:space}, the cohort files, the
+pre-registration and the per-cell results are available~\cite{schiavo2026fedtimevqvae}, with a
+checker for every number below that needs no checkpoint.
+
+\begin{table}[t]
+\caption{Settings shared by all configurations.}
+\label{tab:hparams}
+\centering
+\scriptsize
+\setlength{\tabcolsep}{2.2pt}
+\renewcommand{\arraystretch}{1.0}
+\begin{tabular}{@{}l p{6.95cm}@{}}
+\hline
+data & window $T=2P$, twice the period of the series; per-window z-score; unit stride; five client shards at $10/10/20/20/30\%$ of the training segment, its last $10\%$ for validation \\
+tokenizer & STFT with $n_\mathrm{fft}=4$, giving $H=3$ frequency bands; encoder of base width $16$ with BN; codebook of $K=64$ entries of dimension $64$, EMA $0.99$ \\
+prior & MaskGIT with $4$ layers, $4$ heads, width $128$, feed-forward $512$, dropout $0.2$, cosine mask schedule \\
+optimization & AdamW, learning rate $10^{-3}$, weight decay $0.01$, batch $64$, fp16 mixed precision; the baselines warm up over $10\%$ of their step ceiling and then decay by cosine, the federated rounds run at constant rate \\
+stopping & baselines: patience $2000$ steps within a ceiling of $10^4$ (stage 1) and $5000$ within $5\times10^4$ (stage 2); federated: $10$ local epochs per round, patience $6$ rounds, ceiling $300$ rounds per stage \\
+variants & (h) and (i): $\tau=64$ optimizer steps per round, stage-2 patience $29$ rounds, stage~1 taken from (g); (k): FedProx $\mu=0.01$ \\
+scoring & $\ell=\mathrm{odd}(rW)$ summed over $r\in\{0.1,0.3,0.5\}$; detection windows at stride $\mathrm{round}(0.1\,T)$; the score averaged with its centered moving average of length $T$; threshold at the train quantile $q=0.99$; archive tolerance $64$ \\
+runs & one seed ($0$) per cell; the confirmation sample drawn with seed $20260809$; trained on RTX~3090, RTX~4500~Ada and Quadro~RTX~8000 GPUs \\
+\hline
+\end{tabular}
+\end{table}
 
 \section{Results}
 \label{sec:results}
@@ -407,7 +434,7 @@ emphasize per-series magnitudes and win/loss counts rather than significance.
 Pooling all client windows improves over the average local model on 9 of 10 series in AUPRC and on
 all four discriminating series in the archive metric, where local training obtains $0.40$, $0.80$,
 $0.20$ and $0.20$ against $1.00$ for centralized training in every case. Against the best individual
-client the picture differs: centralized training exceeds it on 7 of 10 series in AUPRC ($p=0.34$),
+client, $\max_j$, the picture differs: centralized training exceeds it on 7 of 10 series in AUPRC ($p=0.34$),
 but on the archive metric never detects an anomaly that no individual client detects, the two
 scoring identically on all ten series, and $\max_j$ is an oracle either way.
 The parameter-free floor stays far below all of them, median AUPRC $0.007$
@@ -428,7 +455,7 @@ ranking of the full profile.
 
 The comparison with local training depends on where local training is stopped. Against the baseline
 used throughout, which stops on validation patience, federation improves 9 of 10 series in AUPRC
-(sign test $p=0.021$); against a baseline trained to a budget four to five times larger with early
+(sign test $p=0.021$); against a baseline trained to a much larger budget with early
 stopping disabled, the median difference is essentially unchanged ($+0.022$ against $+0.021$) but
 the count falls to 6 against 4
 ($p=0.75$), the longer-trained baseline being not uniformly better but more variable: federation
@@ -442,16 +469,11 @@ fp32, which small $\tau$ requires and which changes the round selected, not the 
 confirmation sample that arm was not run, so (h) is compared with (g) and the oracle travels with
 $\tau$: from the bit-identical stage~1 of (g) it wins 25 against 23 in AUPRC (median $0.0000$,
 $p=0.89$) and 2 against 4 with 42 ties on the archive metric ($p=0.69$). Markedly less frequent
-aggregation, the same reference at $31$ local epochs per round with $\approx310$ local steps between
-server updates instead of $100$ to $190$, costs $0.198$ and $0.245$ AUPRC on \texttt{ucr\_011} and
-\texttt{ucr\_043}, so the default frequency is sufficient and increasing it buys nothing.
+aggregation, $24$ and $31$ local epochs per round against the same reference, costs $0.198$ and
+$0.245$ AUPRC on \texttt{ucr\_011} and \texttt{ucr\_043}: the default frequency is sufficient.
 
 \begin{table}[t]
-\caption{Development set. Left: archive accuracy at tolerance $64$; right: AUPRC of the per-timestep
-score, with the parameter-free floor as leftmost reference. $\max_j$ is the best individual client
-and requires test labels to select. The four discriminating series are above the rule. On
-\texttt{ucr\_082} every arm is at floor: the counts in the text rest on differences in the fifth
-decimal.}
+\caption{Development set: archive accuracy and AUPRC.}
 \label{tab:main}
 \centering
 \scriptsize
@@ -475,10 +497,11 @@ decimal.}
 \texttt{ucr\_222} & 0.00 & 0.00 & 0.00 & 0.00 & & 0.002 & 0.046 & 0.077 & 0.083 & 0.054 \\
 \texttt{ucr\_229} & 0.00 & 0.00 & 0.00 & 0.00 & & 0.002 & 0.002 & 0.003 & 0.018 & 0.005 \\
 \hline
+\multicolumn{11}{@{}p{7.6cm}@{}}{Above the rule, the four discriminating series. $\max_j$ = best individual client, selected with test labels. On \texttt{ucr\_082} every arm is at floor: the counts in the text rest on differences in the fifth decimal.} \\
 \end{tabular}
 \end{table}
 
-\subsection{Where the improvement comes from}
+\subsection{Attribution of the improvement}
 \label{subsec:interaction}
 
 To isolate prior sharing we apply the same modification under two tokenizer configurations: (c)
@@ -556,7 +579,7 @@ therefore a repair for this failure mode, not a detector that supersedes federat
 The pre-registered
 sample tests whether the surviving claims hold out of sample, and its analysis was fixed before any
 of its numbers existed: the primary endpoint is the archive accuracy at tolerance $64$, compared by
-a paired sign test with ties counted as ties, and AUPRC is secondary. Three configurations are run
+a two-sided paired sign test with ties excluded, and AUPRC is secondary. Three configurations are run
 on it: local, centralized and (g).
 
 Of the fifty series, 48 are analyzed: on \texttt{ucr\_190} and \texttt{ucr\_240} the federated arm
@@ -585,9 +608,7 @@ pooled training both improve the ranking of anomalous timesteps over the typical
 neither is shown to improve the archive's own localization accuracy.
 
 \begin{table}[t]
-\caption{Confirmation sample, $n=48$, paired by series. Primary endpoint: archive accuracy at
-tolerance $64$; AUPRC secondary. $p$ is a two-sided sign test with ties excluded. The mean is given
-alongside the median because on the primary endpoint the median is zero wherever ties dominate.}
+\caption{Confirmation sample ($n=48$), paired by series.}
 \label{tab:c50}
 \centering
 \scriptsize
@@ -604,6 +625,7 @@ alongside the median because on the primary endpoint the median is zero wherever
 centralized $-$ local  & 14/5/29 & 0.000 & $+0.142$ & 0.064 & & $+0.053$ & $+0.141$ & \textbf{0.002} \\
 (g) $-$ centralized    & 3/8/37  & 0.000 & $-0.058$ & 0.227 & & $-0.009$ & $-0.067$ & 0.060 \\
 \hline
+\multicolumn{9}{@{}p{8.35cm}@{}}{The mean is given alongside the median because on the primary endpoint the median is zero wherever ties dominate.} \\
 \end{tabular}
 \end{table}
 
@@ -625,9 +647,7 @@ generator that makes every input more typical. Each arm is judged by its own pri
 $\Delta$ are not comparable across arms while $G$ is.
 
 \begin{table}[t]
-\caption{Counterfactual quality. $\Delta$ = plausibility gain on the rewritten positions, each arm
-under its own prior; $G$ = specificity gap between anomalous and normal windows. Above the rule, the
-four discriminating series.}
+\caption{Counterfactual quality: plausibility $\Delta$ and specificity $G$.}
 \label{tab:cf}
 \centering
 \scriptsize
@@ -663,12 +683,11 @@ shows no loss comparable to the differences it produces in detection.
 \label{subsec:limitations}
 
 Every cell is a single seed, so per-series differences below a few hundredths should not be read as
-effects. Six of the ten development series cannot separate the arms at all, and that set was chosen
-purposively, so no quantity measured on it estimates a population; that role belongs to the random
-sample, whose primary endpoint proved too coarse to separate any pair of arms. Finally, the aligned
-and unaligned branches of Section~\ref{subsec:interaction} were not run entirely on matched
-hardware, (g) having run on one accelerator while (e) used two others for seven of the ten series: a
-confound we can declare but not bound.
+effects. Six of the ten development series cannot separate the arms, and that set was chosen
+purposively, so nothing measured on it estimates a population; that role belongs to the random
+sample. Finally, the branches
+of Section~\ref{subsec:interaction} ran on unmatched hardware, (g) on one accelerator and (e) on two
+others: a confound we can declare but not bound.
 
 \section{Conclusion}
 \label{sec:conclusion}
@@ -680,9 +699,9 @@ averaged, and the identical modification is a null when they have not been. Alig
 label but a quantity read off the checkpoints: under the strongest configuration the five clients
 tokenize identically, against a median $\kappa=0.07$ with local encoders and a bit-identical
 codebook on both sides. Within that constraint, \emph{what} is
-shared matters more than \emph{how} it is aggregated: replacing encoder FedAvg by FedProx, by
-FedProto or by a control that shares only the initialization changes nothing measurable, while
-changing the codebook rule changes a great deal on individual series and nothing in aggregate.
+shared matters more than \emph{how} it is aggregated: FedProx, FedProto and a control sharing only
+the initialization change nothing measurable, the codebook rule much per series and nothing in
+aggregate.
 
 The empirical bottom line is deliberately narrow. Out of sample the federated model improves the
 ranking of anomalous timesteps over local training and matches pooled training on the archive's own
@@ -690,20 +709,22 @@ localization metric, on which our pre-registered primary endpoint separates no p
 pooled training included: what the sample establishes is parity with an upper bound that does not
 itself separate. Weight-space aggregation can also propagate a false alarm raised by a minority of
 the clients to all of them, and there fusing the local models' scores instead of their weights
-recovers the gap at no training cost, the diversity an ensemble exploits being exactly what
-parameter averaging destroys. On the counterfactual, federation costs nothing we can
-measure, which locates its price entirely in detection.
+recovers the gap at no training cost, the diversity an ensemble exploits being what parameter
+averaging destroys. On the counterfactual federation costs nothing we can measure, which locates its
+price in detection.
 
 Repeating the matched contrasts across seeds would turn the interaction into a quantity, and the
 alignment axis, measured only at its extremes, leaves open where partial mechanisms land. Our split
-is also deliberately homogeneous, and two choices are expected to invert with heterogeneous clients:
-pooling the BN statistics, adopted against the FedBN prescription~\cite{li2021fedbn} precisely
-because no feature shift exists here, and a single shared codebook.
+is also deliberately homogeneous, and two choices should invert with heterogeneous clients: pooling
+the BN statistics, adopted against FedBN~\cite{li2021fedbn} because no feature shift exists here,
+and a single shared codebook. The evidence is confined to one archive, and testing the interaction
+on benchmarks outside UCR is the natural next step.
 
 \section*{Data and Resources}
-The data used in this study are in the \href{https://www.cs.ucr.edu/\%7Eeamonn/time_series_data_2018/UCR_TimeSeriesAnomalyDatasets2021.zip}{UCR Time Series Anomaly Archive}. The implementation is available at \texttt{[REPOSITORY URL]}.
-% ⚠️ DA COMPILARE PRIMA DELLA SUBMISSION: sostituire \texttt{[REPOSITORY URL]} con il link vero,
-% p.es. \href{https://github.com/<org>/<repo>}{github.com/<org>/<repo>}.
+The data are those of the \href{https://www.cs.ucr.edu/\%7Eeamonn/time_series_data_2018/UCR_TimeSeriesAnomalyDatasets2021.zip}{UCR Time Series Anomaly Archive}; the code and the results are in~\cite{schiavo2026fedtimevqvae}.
+% Il link e' quello vero dal 2026-08-16 (era \texttt{[REPOSITORY URL]}). La repo pubblica e'
+% GENERATA da scripts/make_release.sh: se cambia il codice, si rigenera e si ripusha, non si
+% edita a mano.
 % La riga finiva con `[NAME] is available on %\href{LINK}{LINK}.`: il % commentava anche il punto
 % finale, quindi nel PDF la frase si troncava a "available on", senza link e senza punteggiatura.
 
